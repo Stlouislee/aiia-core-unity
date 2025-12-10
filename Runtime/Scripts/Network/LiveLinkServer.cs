@@ -1,402 +1,366 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
-using System.Net.WebSockets;
+using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 
 namespace LiveLink.Network
 {
-    /// <summary>
-    /// WebSocket server that handles bidirectional communication with external clients.
-    /// Uses System.Net.WebSockets for native .NET WebSocket support.
-    /// </summary>
+    public class WebSocketConnection : IDisposable
+    {
+        private readonly TcpClient _client;
+        private readonly NetworkStream _stream;
+        private readonly string _id;
+        private bool _isDisposed;
+
+        public string Id => _id;
+        public bool IsConnected => _client != null && _client.Connected && !_isDisposed;
+
+        public WebSocketConnection(TcpClient client)
+        {
+            _client = client;
+            _stream = client.GetStream();
+            _id = Guid.NewGuid().ToString("N");
+        }
+
+        public async Task SendAsync(string message)
+        {
+            if (!IsConnected) return;
+            byte[] payload = Encoding.UTF8.GetBytes(message);
+            await SendFrameAsync(payload, 0x1); // Text frame
+        }
+
+        public async Task CloseAsync()
+        {
+            if (!IsConnected) return;
+            try
+            {
+                await SendFrameAsync(new byte[0], 0x8); // Close frame
+            }
+            catch { }
+            Dispose();
+        }
+
+        private async Task SendFrameAsync(byte[] payload, int opcode)
+        {
+            using (var ms = new MemoryStream())
+            {
+                byte b1 = (byte)(0x80 | (opcode & 0x0F)); // FIN = 1
+                ms.WriteByte(b1);
+
+                byte b2 = 0; // Mask = 0 (Server doesn't mask)
+                if (payload.Length <= 125)
+                {
+                    b2 |= (byte)payload.Length;
+                    ms.WriteByte(b2);
+                }
+                else if (payload.Length <= 65535)
+                {
+                    b2 |= 126;
+                    ms.WriteByte(b2);
+                    ms.WriteByte((byte)(payload.Length >> 8));
+                    ms.WriteByte((byte)(payload.Length & 0xFF));
+                }
+                else
+                {
+                    b2 |= 127;
+                    ms.WriteByte(b2);
+                    // Write 64-bit length (big endian)
+                    long len = payload.Length;
+                    for (int i = 7; i >= 0; i--)
+                    {
+                        ms.WriteByte((byte)((len >> (i * 8)) & 0xFF));
+                    }
+                }
+
+                ms.Write(payload, 0, payload.Length);
+                byte[] frame = ms.ToArray();
+                await _stream.WriteAsync(frame, 0, frame.Length);
+            }
+        }
+
+        public NetworkStream Stream => _stream;
+        public TcpClient Client => _client;
+
+        public void Dispose()
+        {
+            if (_isDisposed) return;
+            _isDisposed = true;
+            try { _stream?.Close(); } catch { }
+            try { _client?.Close(); } catch { }
+        }
+    }
+
     public class LiveLinkServer : IDisposable
     {
-        private HttpListener _httpListener;
+        private TcpListener _listener;
         private CancellationTokenSource _cancellationTokenSource;
-        private readonly List<WebSocket> _connectedClients = new List<WebSocket>();
+        private readonly List<WebSocketConnection> _connectedClients = new List<WebSocketConnection>();
         private readonly object _clientsLock = new object();
         private bool _isRunning = false;
         private int _port;
 
-        /// <summary>
-        /// Event fired when a message is received from any client.
-        /// Called on a background thread - use MainThreadDispatcher to interact with Unity API.
-        /// </summary>
-        public event Action<string, WebSocket> OnMessageReceived;
-
-        /// <summary>
-        /// Event fired when a client connects.
-        /// </summary>
-        public event Action<WebSocket> OnClientConnected;
-
-        /// <summary>
-        /// Event fired when a client disconnects.
-        /// </summary>
-        public event Action<WebSocket> OnClientDisconnected;
-
-        /// <summary>
-        /// Event fired when an error occurs.
-        /// </summary>
+        public event Action<string, WebSocketConnection> OnMessageReceived;
+        public event Action<WebSocketConnection> OnClientConnected;
+        public event Action<WebSocketConnection> OnClientDisconnected;
         public event Action<Exception> OnError;
 
-        /// <summary>
-        /// Gets the number of currently connected clients.
-        /// </summary>
         public int ClientCount
         {
-            get
-            {
-                lock (_clientsLock)
-                {
-                    return _connectedClients.Count;
-                }
-            }
+            get { lock (_clientsLock) return _connectedClients.Count; }
         }
 
-        /// <summary>
-        /// Gets whether the server is currently running.
-        /// </summary>
         public bool IsRunning => _isRunning;
-
-        /// <summary>
-        /// Gets the port the server is listening on.
-        /// </summary>
         public int Port => _port;
 
-        /// <summary>
-        /// Starts the WebSocket server on the specified port.
-        /// </summary>
-        /// <param name="port">The port to listen on.</param>
         public void StartServer(int port)
         {
-            if (_isRunning)
-            {
-                Debug.LogWarning("[LiveLink] Server is already running.");
-                return;
-            }
+            if (_isRunning) return;
 
             _port = port;
             _cancellationTokenSource = new CancellationTokenSource();
 
             try
             {
-                _httpListener = new HttpListener();
-                // Try wildcard first for external access
-                _httpListener.Prefixes.Add($"http://+:{port}/");
-                _httpListener.Start();
+                _listener = new TcpListener(IPAddress.Any, port);
+                _listener.Start();
                 _isRunning = true;
 
                 Debug.Log($"[LiveLink] WebSocket server started on port {port}");
-
-                // Start accepting connections
                 Task.Run(() => AcceptConnectionsAsync(_cancellationTokenSource.Token));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // Fallback if wildcard fails (requires admin on Windows or port conflict)
-                try
-                {
-                    _httpListener?.Close();
-                    _httpListener = new HttpListener();
-                    _httpListener.Prefixes.Add($"http://localhost:{port}/");
-                    _httpListener.Prefixes.Add($"http://127.0.0.1:{port}/");
-                    _httpListener.Start();
-                    _isRunning = true;
-
-                    Debug.Log($"[LiveLink] WebSocket server started on port {port} (localhost only)");
-                    Task.Run(() => AcceptConnectionsAsync(_cancellationTokenSource.Token));
-                }
-                catch (Exception innerEx)
-                {
-                    Debug.LogError($"[LiveLink] Failed to start server: {innerEx.Message}");
-                    OnError?.Invoke(innerEx);
-                }
+                Debug.LogError($"[LiveLink] Failed to start server: {ex.Message}");
+                OnError?.Invoke(ex);
             }
         }
 
-        /// <summary>
-        /// Stops the WebSocket server and disconnects all clients.
-        /// </summary>
         public void StopServer()
         {
             if (!_isRunning) return;
-
             _isRunning = false;
             _cancellationTokenSource?.Cancel();
 
-            // Close all client connections
             lock (_clientsLock)
             {
                 foreach (var client in _connectedClients)
                 {
-                    try
-                    {
-                        if (client.State == WebSocketState.Open)
-                        {
-                            client.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server shutting down", CancellationToken.None).Wait(1000);
-                        }
-                        client.Dispose();
-                    }
-                    catch { }
+                    client.Dispose();
                 }
                 _connectedClients.Clear();
             }
 
-            try
-            {
-                _httpListener?.Stop();
-                _httpListener?.Close();
-            }
-            catch { }
-
-            _httpListener = null;
-            _cancellationTokenSource?.Dispose();
-            _cancellationTokenSource = null;
-
+            try { _listener?.Stop(); } catch { }
             Debug.Log("[LiveLink] WebSocket server stopped.");
         }
 
-        private async Task AcceptConnectionsAsync(CancellationToken cancellationToken)
+        private async Task AcceptConnectionsAsync(CancellationToken token)
         {
-            while (_isRunning && !cancellationToken.IsCancellationRequested)
+            while (_isRunning && !token.IsCancellationRequested)
             {
                 try
                 {
-                    var context = await _httpListener.GetContextAsync();
-
-                    // Check for WebSocket request (native or manual check)
-                    bool isWebSocket = context.Request.IsWebSocketRequest;
-                    if (!isWebSocket)
-                    {
-                        string connection = context.Request.Headers["Connection"];
-                        string upgrade = context.Request.Headers["Upgrade"];
-                        
-                        if (!string.IsNullOrEmpty(connection) && 
-                            !string.IsNullOrEmpty(upgrade) && 
-                            connection.ToLower().Contains("upgrade") && 
-                            upgrade.ToLower() == "websocket")
-                        {
-                            isWebSocket = true;
-                        }
-                    }
-
-                    if (isWebSocket)
-                    {
-                        var wsContext = await context.AcceptWebSocketAsync(null);
-                        var webSocket = wsContext.WebSocket;
-
-                        lock (_clientsLock)
-                        {
-                            _connectedClients.Add(webSocket);
-                        }
-
-                        MainThreadDispatcher.EnqueueSafe(() =>
-                        {
-                            Debug.Log($"[LiveLink] Client connected. Total clients: {ClientCount}");
-                        }, "OnClientConnected");
-
-                        OnClientConnected?.Invoke(webSocket);
-
-                        // Handle this client in a separate task
-                        _ = Task.Run(() => HandleClientAsync(webSocket, cancellationToken));
-                    }
-                    else
-                    {
-                        // Return a simple HTTP response for non-WebSocket requests
-                        context.Response.StatusCode = 200;
-                        var responseBytes = Encoding.UTF8.GetBytes("LiveLink WebSocket Server. Connect via WebSocket protocol.");
-                        context.Response.ContentLength64 = responseBytes.Length;
-                        await context.Response.OutputStream.WriteAsync(responseBytes, 0, responseBytes.Length);
-                        context.Response.Close();
-                    }
+                    var tcpClient = await _listener.AcceptTcpClientAsync();
+                    _ = Task.Run(() => HandleNewClientAsync(tcpClient, token));
                 }
-                catch (ObjectDisposedException)
-                {
-                    // Server was stopped
-                    break;
-                }
-                catch (HttpListenerException)
-                {
-                    // Server was stopped
-                    break;
-                }
+                catch (ObjectDisposedException) { break; }
                 catch (Exception ex)
                 {
-                    if (_isRunning)
-                    {
-                        MainThreadDispatcher.EnqueueSafe(() =>
-                        {
-                            Debug.LogError($"[LiveLink] Error accepting connection: {ex.Message}");
-                        }, "AcceptConnection");
-                    }
+                    if (_isRunning) Debug.LogError($"[LiveLink] Accept error: {ex.Message}");
                 }
             }
         }
 
-        private async Task HandleClientAsync(WebSocket webSocket, CancellationToken cancellationToken)
+        private async Task HandleNewClientAsync(TcpClient tcpClient, CancellationToken token)
         {
-            var buffer = new byte[8192];
-
+            WebSocketConnection wsConnection = null;
             try
             {
-                while (webSocket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+                var stream = tcpClient.GetStream();
+                if (await PerformHandshakeAsync(stream))
                 {
-                    var messageBuilder = new StringBuilder();
-                    WebSocketReceiveResult result;
-
-                    do
+                    wsConnection = new WebSocketConnection(tcpClient);
+                    
+                    lock (_clientsLock)
                     {
-                        result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
-
-                        if (result.MessageType == WebSocketMessageType.Close)
-                        {
-                            await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client requested close", CancellationToken.None);
-                            break;
-                        }
-
-                        if (result.MessageType == WebSocketMessageType.Text)
-                        {
-                            messageBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-                        }
-                    }
-                    while (!result.EndOfMessage);
-
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        break;
+                        _connectedClients.Add(wsConnection);
                     }
 
-                    var message = messageBuilder.ToString();
-                    if (!string.IsNullOrEmpty(message))
+                    MainThreadDispatcher.EnqueueSafe(() =>
                     {
-                        OnMessageReceived?.Invoke(message, webSocket);
-                    }
+                        Debug.Log($"[LiveLink] Client connected. Total: {ClientCount}");
+                    }, "OnClientConnected");
+
+                    OnClientConnected?.Invoke(wsConnection);
+
+                    await ReadLoopAsync(wsConnection, token);
                 }
-            }
-            catch (WebSocketException)
-            {
-                // Client disconnected unexpectedly
-            }
-            catch (OperationCanceledException)
-            {
-                // Server is shutting down
+                else
+                {
+                    tcpClient.Close();
+                }
             }
             catch (Exception ex)
             {
-                MainThreadDispatcher.EnqueueSafe(() =>
-                {
-                    Debug.LogError($"[LiveLink] Error handling client: {ex.Message}");
-                }, "HandleClient");
+                // Debug.LogError($"[LiveLink] Client error: {ex.Message}");
             }
             finally
             {
-                RemoveClient(webSocket);
+                if (wsConnection != null)
+                {
+                    RemoveClient(wsConnection);
+                }
+                else
+                {
+                    tcpClient.Close();
+                }
             }
         }
 
-        private void RemoveClient(WebSocket webSocket)
+        private async Task<bool> PerformHandshakeAsync(NetworkStream stream)
+        {
+            byte[] buffer = new byte[4096];
+            int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
+            string request = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+            if (Regex.IsMatch(request, "^GET", RegexOptions.IgnoreCase) && request.Contains("Upgrade: websocket"))
+            {
+                string swk = Regex.Match(request, "Sec-WebSocket-Key: (.*)").Groups[1].Value.Trim();
+                string swka = swk + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+                byte[] swkaSha1 = SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(swka));
+                string swkaBase64 = Convert.ToBase64String(swkaSha1);
+
+                string response = "HTTP/1.1 101 Switching Protocols\r\n" +
+                                  "Connection: Upgrade\r\n" +
+                                  "Upgrade: websocket\r\n" +
+                                  "Sec-WebSocket-Accept: " + swkaBase64 + "\r\n\r\n";
+
+                byte[] responseBytes = Encoding.UTF8.GetBytes(response);
+                await stream.WriteAsync(responseBytes, 0, responseBytes.Length);
+                return true;
+            }
+            return false;
+        }
+
+        private async Task ReadLoopAsync(WebSocketConnection connection, CancellationToken token)
+        {
+            var stream = connection.Stream;
+            byte[] header = new byte[2];
+
+            while (connection.IsConnected && !token.IsCancellationRequested)
+            {
+                // Read header
+                int read = await ReadExactlyAsync(stream, header, 2);
+                if (read < 2) break;
+
+                bool fin = (header[0] & 0x80) != 0;
+                int opcode = header[0] & 0x0F;
+                bool mask = (header[1] & 0x80) != 0;
+                long payloadLen = header[1] & 0x7F;
+
+                if (opcode == 0x8) break; // Close
+
+                // Read extended length
+                if (payloadLen == 126)
+                {
+                    byte[] lenBytes = new byte[2];
+                    await ReadExactlyAsync(stream, lenBytes, 2);
+                    // Big endian
+                    payloadLen = (lenBytes[0] << 8) | lenBytes[1];
+                }
+                else if (payloadLen == 127)
+                {
+                    byte[] lenBytes = new byte[8];
+                    await ReadExactlyAsync(stream, lenBytes, 8);
+                    // Big endian (ignoring high bits for simplicity as we can't handle > 2GB anyway)
+                    payloadLen = 0;
+                    for(int i=0; i<8; i++) payloadLen = (payloadLen << 8) | lenBytes[i];
+                }
+
+                // Read mask
+                byte[] maskKey = new byte[4];
+                if (mask)
+                {
+                    await ReadExactlyAsync(stream, maskKey, 4);
+                }
+
+                // Read payload
+                if (payloadLen > 0)
+                {
+                    byte[] payload = new byte[payloadLen];
+                    await ReadExactlyAsync(stream, payload, (int)payloadLen);
+
+                    if (mask)
+                    {
+                        for (int i = 0; i < payload.Length; i++)
+                        {
+                            payload[i] = (byte)(payload[i] ^ maskKey[i % 4]);
+                        }
+                    }
+
+                    if (opcode == 0x1) // Text
+                    {
+                        string msg = Encoding.UTF8.GetString(payload);
+                        OnMessageReceived?.Invoke(msg, connection);
+                    }
+                }
+            }
+        }
+
+        private async Task<int> ReadExactlyAsync(NetworkStream stream, byte[] buffer, int count)
+        {
+            int total = 0;
+            while (total < count)
+            {
+                int read = await stream.ReadAsync(buffer, total, count - total);
+                if (read == 0) return total;
+                total += read;
+            }
+            return total;
+        }
+
+        private void RemoveClient(WebSocketConnection client)
         {
             lock (_clientsLock)
             {
-                _connectedClients.Remove(webSocket);
+                _connectedClients.Remove(client);
             }
-
-            try
-            {
-                webSocket.Dispose();
-            }
-            catch { }
-
+            
             MainThreadDispatcher.EnqueueSafe(() =>
             {
-                Debug.Log($"[LiveLink] Client disconnected. Total clients: {ClientCount}");
+                Debug.Log($"[LiveLink] Client disconnected. Total: {ClientCount}");
             }, "OnClientDisconnected");
 
-            OnClientDisconnected?.Invoke(webSocket);
+            OnClientDisconnected?.Invoke(client);
+            client.Dispose();
         }
 
-        /// <summary>
-        /// Sends a message to all connected clients.
-        /// </summary>
-        /// <param name="message">The message to broadcast.</param>
         public async Task BroadcastAsync(string message)
         {
-            if (string.IsNullOrEmpty(message)) return;
-
-            var buffer = Encoding.UTF8.GetBytes(message);
-            var segment = new ArraySegment<byte>(buffer);
-
-            List<WebSocket> clientsCopy;
-            lock (_clientsLock)
+            List<WebSocketConnection> clients;
+            lock (_clientsLock) clients = new List<WebSocketConnection>(_connectedClients);
+            
+            foreach (var client in clients)
             {
-                clientsCopy = new List<WebSocket>(_connectedClients);
-            }
-
-            var deadClients = new List<WebSocket>();
-
-            foreach (var client in clientsCopy)
-            {
-                try
-                {
-                    if (client.State == WebSocketState.Open)
-                    {
-                        await client.SendAsync(segment, WebSocketMessageType.Text, true, CancellationToken.None);
-                    }
-                    else
-                    {
-                        deadClients.Add(client);
-                    }
-                }
-                catch
-                {
-                    deadClients.Add(client);
-                }
-            }
-
-            // Clean up dead clients
-            foreach (var client in deadClients)
-            {
-                RemoveClient(client);
+                try { await client.SendAsync(message); } catch { }
             }
         }
 
-        /// <summary>
-        /// Sends a message to a specific client.
-        /// </summary>
-        /// <param name="client">The WebSocket client to send to.</param>
-        /// <param name="message">The message to send.</param>
-        public async Task SendAsync(WebSocket client, string message)
-        {
-            if (client == null || string.IsNullOrEmpty(message)) return;
-
-            try
-            {
-                if (client.State == WebSocketState.Open)
-                {
-                    var buffer = Encoding.UTF8.GetBytes(message);
-                    await client.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None);
-                }
-            }
-            catch (Exception ex)
-            {
-                MainThreadDispatcher.EnqueueSafe(() =>
-                {
-                    Debug.LogError($"[LiveLink] Error sending message: {ex.Message}");
-                }, "SendAsync");
-            }
-        }
-
-        /// <summary>
-        /// Synchronous broadcast wrapper for use from main thread.
-        /// </summary>
-        /// <param name="message">The message to broadcast.</param>
         public void Broadcast(string message)
         {
-            Task.Run(async () => await BroadcastAsync(message));
+            Task.Run(() => BroadcastAsync(message));
+        }
+
+        public async Task SendAsync(WebSocketConnection client, string message)
+        {
+            await client.SendAsync(message);
         }
 
         public void Dispose()

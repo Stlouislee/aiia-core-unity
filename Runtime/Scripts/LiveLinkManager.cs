@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Net.WebSockets;
+// using System.Net.WebSockets;
 using UnityEngine;
 using Newtonsoft.Json.Linq;
 using LiveLink.Network;
@@ -259,7 +259,7 @@ namespace LiveLink
 
         #region Message Handling
 
-        private void HandleMessage(string message, WebSocket client)
+        private void HandleMessage(string message, WebSocketConnection client)
         {
             if (_debugLogging)
             {
@@ -276,7 +276,7 @@ namespace LiveLink
             }, "ProcessCommand");
         }
 
-        private void ProcessCommand(string message, WebSocket client)
+        private void ProcessCommand(string message, WebSocketConnection client)
         {
             CommandPacket command = null;
             try
@@ -355,7 +355,7 @@ namespace LiveLink
 
         #region Command Handlers
 
-        private void HandleSpawn(CommandPacket command, WebSocket client)
+        private void HandleSpawn(CommandPacket command, WebSocketConnection client)
         {
             var payload = command.GetPayload<SpawnPayload>();
             if (payload == null || string.IsNullOrEmpty(payload.PrefabKey))
@@ -433,7 +433,7 @@ namespace LiveLink
             SendResponse(client, ResponsePacket.Ok("Object spawned", command.RequestId, responseData));
         }
 
-        private void HandleTransform(CommandPacket command, WebSocket client)
+        private void HandleTransform(CommandPacket command, WebSocketConnection client)
         {
             var payload = command.GetPayload<TransformPayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
@@ -477,7 +477,7 @@ namespace LiveLink
             SendResponse(client, ResponsePacket.Ok("Transform updated", command.RequestId));
         }
 
-        private void HandleDelete(CommandPacket command, WebSocket client)
+        private void HandleDelete(CommandPacket command, WebSocketConnection client)
         {
             var payload = command.GetPayload<DeletePayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
@@ -506,7 +506,7 @@ namespace LiveLink
             SendResponse(client, ResponsePacket.Ok("Object deleted", command.RequestId));
         }
 
-        private void HandleRename(CommandPacket command, WebSocket client)
+        private void HandleRename(CommandPacket command, WebSocketConnection client)
         {
             var payload = command.GetPayload<RenamePayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
@@ -526,7 +526,7 @@ namespace LiveLink
             SendResponse(client, ResponsePacket.Ok("Object renamed", command.RequestId));
         }
 
-        private void HandleSetParent(CommandPacket command, WebSocket client)
+        private void HandleSetParent(CommandPacket command, WebSocketConnection client)
         {
             var payload = command.GetPayload<SetParentPayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
@@ -558,7 +558,7 @@ namespace LiveLink
             SendResponse(client, ResponsePacket.Ok("Parent changed", command.RequestId));
         }
 
-        private void HandleSetActive(CommandPacket command, WebSocket client)
+        private void HandleSetActive(CommandPacket command, WebSocketConnection client)
         {
             var payload = command.GetPayload<SetActivePayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
@@ -578,7 +578,7 @@ namespace LiveLink
             SendResponse(client, ResponsePacket.Ok($"Object {(payload.Active ? "activated" : "deactivated")}", command.RequestId));
         }
 
-        private void HandleSceneDump(CommandPacket command, WebSocket client)
+        private void HandleSceneDump(CommandPacket command, WebSocketConnection client)
         {
             var payload = command.GetPayload<RequestSceneDumpPayload>();
             bool includeInactive = payload?.IncludeInactive ?? _includeInactive;
@@ -651,7 +651,7 @@ namespace LiveLink
             _server?.Broadcast(message);
         }
 
-        private void SendToClient(WebSocket client, string message)
+        private void SendToClient(WebSocketConnection client, string message)
         {
             if (_debugLogging)
             {
@@ -660,13 +660,13 @@ namespace LiveLink
             _ = _server?.SendAsync(client, message);
         }
 
-        private void SendResponse(WebSocket client, ResponsePacket response)
+        private void SendResponse(WebSocketConnection client, ResponsePacket response)
         {
             string json = PacketSerializer.Serialize(response);
             SendToClient(client, json);
         }
 
-        private void OnClientConnected(WebSocket client)
+        private void OnClientConnected(WebSocketConnection client)
         {
             MainThreadDispatcher.EnqueueSafe(() =>
             {
@@ -677,7 +677,7 @@ namespace LiveLink
             }, "OnClientConnected");
         }
 
-        private void OnClientDisconnected(WebSocket client)
+        private void OnClientDisconnected(WebSocketConnection client)
         {
             // Clean up if needed
         }
