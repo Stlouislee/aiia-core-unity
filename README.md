@@ -21,13 +21,13 @@ A lightweight Unity package that establishes a bidirectional WebSocket bridge be
 1. Open Unity and go to **Window > Package Manager**
 2. Click the **+** button in the top-left corner
 3. Select **Add package from git URL...**
-4. Enter the following URL:
+4. Enter the following URL (including `.git` at the end):
 
 ```
 https://github.com/Stlouislee/aiia-core-unity.git
 ```
 
-5. Click **Add**
+5. Click **Add** and wait for the package to download and import
 
 ### Manual Installation
 
