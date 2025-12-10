@@ -85,9 +85,7 @@ namespace LiveLink.Network
             try
             {
                 _httpListener = new HttpListener();
-                _httpListener.Prefixes.Add($"http://localhost:{port}/");
-                _httpListener.Prefixes.Add($"http://127.0.0.1:{port}/");
-                // Add wildcard for external connections
+                // Try wildcard first for external access
                 _httpListener.Prefixes.Add($"http://+:{port}/");
                 _httpListener.Start();
                 _isRunning = true;
@@ -97,9 +95,9 @@ namespace LiveLink.Network
                 // Start accepting connections
                 Task.Run(() => AcceptConnectionsAsync(_cancellationTokenSource.Token));
             }
-            catch (HttpListenerException ex)
+            catch (Exception)
             {
-                // Fallback if wildcard fails (requires admin on Windows)
+                // Fallback if wildcard fails (requires admin on Windows or port conflict)
                 try
                 {
                     _httpListener?.Close();
@@ -117,11 +115,6 @@ namespace LiveLink.Network
                     Debug.LogError($"[LiveLink] Failed to start server: {innerEx.Message}");
                     OnError?.Invoke(innerEx);
                 }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[LiveLink] Failed to start server: {ex.Message}");
-                OnError?.Invoke(ex);
             }
         }
 
