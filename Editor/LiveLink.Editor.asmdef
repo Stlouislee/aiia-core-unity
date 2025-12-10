@@ -1,0 +1,18 @@
+{
+    "name": "LiveLink.Editor",
+    "rootNamespace": "LiveLink.Editor",
+    "references": [
+        "LiveLink"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

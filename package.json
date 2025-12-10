@@ -1,0 +1,27 @@
+{
+  "name": "com.livelink.core",
+  "version": "1.0.0",
+  "displayName": "Unity LiveLink",
+  "description": "A lightweight Unity package that establishes a bidirectional WebSocket bridge between a running Unity scene and external applications (Python, Node.js, Web Dashboards).",
+  "unity": "2020.3",
+  "unityRelease": "0f1",
+  "documentationUrl": "https://github.com/Stlouislee/aiia-core-unity#readme",
+  "changelogUrl": "https://github.com/Stlouislee/aiia-core-unity/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/Stlouislee/aiia-core-unity/blob/main/LICENSE",
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.0.2"
+  },
+  "keywords": [
+    "livelink",
+    "websocket",
+    "bridge",
+    "networking",
+    "external",
+    "python",
+    "api"
+  ],
+  "author": {
+    "name": "LiveLink Team",
+    "url": "https://github.com/Stlouislee/aiia-core-unity"
+  }
+}
