@@ -724,7 +724,11 @@ namespace LiveLink
         /// </summary>
         public List<string> GetRegisteredPrefabNames()
         {
-            return new List<string>(_prefabLookup?.Keys ?? Array.Empty<string>());
+            if (_prefabLookup == null)
+            {
+                return new List<string>();
+            }
+            return new List<string>(_prefabLookup.Keys);
         }
 
         #endregion
