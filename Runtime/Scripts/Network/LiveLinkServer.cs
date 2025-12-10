@@ -168,7 +168,23 @@ namespace LiveLink.Network
                 {
                     var context = await _httpListener.GetContextAsync();
 
-                    if (context.Request.IsWebSocketRequest)
+                    // Check for WebSocket request (native or manual check)
+                    bool isWebSocket = context.Request.IsWebSocketRequest;
+                    if (!isWebSocket)
+                    {
+                        string connection = context.Request.Headers["Connection"];
+                        string upgrade = context.Request.Headers["Upgrade"];
+                        
+                        if (!string.IsNullOrEmpty(connection) && 
+                            !string.IsNullOrEmpty(upgrade) && 
+                            connection.ToLower().Contains("upgrade") && 
+                            upgrade.ToLower() == "websocket")
+                        {
+                            isWebSocket = true;
+                        }
+                    }
+
+                    if (isWebSocket)
                     {
                         var wsContext = await context.AcceptWebSocketAsync(null);
                         var webSocket = wsContext.WebSocket;
