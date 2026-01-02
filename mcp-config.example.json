@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "unity-livelink": {
+      "transport": {
+        "type": "websocket",
+        "url": "ws://localhost:8080"
+      },
+      "capabilities": {
+        "resources": true,
+        "tools": true
+      },
+      "metadata": {
+        "description": "Unity LiveLink MCP endpoint exposing scene resources and tools",
+        "notes": "Ensure LiveLinkManager is running in Play Mode with MCP support enabled."
+      }
+    }
+  }
+}

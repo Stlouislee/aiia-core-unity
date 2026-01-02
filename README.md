@@ -3,7 +3,7 @@
 [![Unity 2020.3+](https://img.shields.io/badge/Unity-2020.3%2B-blue.svg)](https://unity.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A lightweight Unity package that establishes a bidirectional WebSocket bridge between a running Unity scene and external applications (Python, Node.js, Web Dashboards).
+A lightweight Unity package that establishes a bidirectional WebSocket bridge between a running Unity scene and external applications (Python, Node.js, Web Dashboards). Now also speaks MCP (Model Context Protocol) via JSON-RPC so LLM clients can list/read scene resources and call Unity tools.
 
 ## Features
 
@@ -13,6 +13,7 @@ A lightweight Unity package that establishes a bidirectional WebSocket bridge be
 - ⚡ **Delta Sync**: Efficient updates that only transmit changed objects
 - 🔧 **Prefab Spawning**: Spawn registered prefabs from external commands
 - 🖥️ **Custom Editor**: Easy-to-use inspector with status display and controls
+- 🤝 **MCP Support**: JSON-RPC endpoint exposing scene resources and Unity tools
 
 ## Installation
 
@@ -60,6 +61,64 @@ The server will start automatically (if Auto Start is enabled) and begin accepti
 ## Communication Protocol
 
 All communication uses JSON over WebSocket. Connect to `ws://localhost:8080/` (or your configured port).
+
+### MCP (Model Context Protocol)
+
+The same WebSocket now accepts JSON-RPC 2.0 methods compatible with MCP-capable LLM clients.
+
+- `resources/list` → returns MCP resources for the active scene (`mcp://unity/scenes/{scene}/objects/{uuid}`)
+- `resources/read` → returns content for a resource URI (object snapshot as JSON)
+- `tools/list` → returns available tools
+- `tools/call` → invokes a tool (`spawn_object`, `transform_object`, `delete_object`, `set_object_parent`, `set_object_active`, `rename_object`)
+
+Example MCP request/response:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"resources/list"}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "resources": [
+      {
+        "uri": "mcp://unity/scenes/SampleScene",
+        "name": "SampleScene",
+        "description": "Unity scene root",
+        "mimeType": "application/json"
+      },
+      {
+        "uri": "mcp://unity/scenes/SampleScene/objects/abc123",
+        "name": "Player",
+        "description": "Unity GameObject (Player)",
+        "mimeType": "application/json"
+      }
+    ]
+  }
+}
+```
+
+`tools/call` example (spawn):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "spawn_object",
+    "arguments": {
+      "prefab_key": "Cube",
+      "position": [0, 1, 0],
+      "name": "MCP Cube"
+    }
+  }
+}
+```
+
+See `mcp-config.example.json` for a ready-to-copy client config.
 
 ### Receiving Scene Data
 
@@ -326,6 +385,9 @@ com.livelink.core/
 │       ├── LiveLinkManager.cs     # Main manager component
 │       ├── MainThreadDispatcher.cs # Thread-safe dispatcher
 │       ├── SceneScanner.cs        # Hierarchy serialization
+│       ├── MCP/                   # MCP JSON-RPC support
+│       │   ├── McpTypes.cs        # JSON-RPC + MCP DTOs
+│       │   └── McpResourceMapper.cs # URI + content helpers
 │       └── Network/
 │           ├── LiveLinkServer.cs  # WebSocket server
 │           └── PacketSchemas.cs   # JSON DTOs
@@ -346,6 +408,7 @@ com.livelink.core/
 - [ ] Editor scene control (not just Play Mode)
 - [ ] Multiple scene support
 - [ ] Custom event system
+- [ ] Expanded MCP tools for component data
 
 ## License
 
