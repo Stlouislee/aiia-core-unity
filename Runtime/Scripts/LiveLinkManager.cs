@@ -2,9 +2,7 @@ using System;
 using System.Collections.Generic;
 // using System.Net.WebSockets;
 using UnityEngine;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using LiveLink.MCP;
 using LiveLink.Network;
 
 namespace LiveLink
@@ -112,15 +110,19 @@ namespace LiveLink
             }
         }
 
+        /// <summary>
+        /// Gets the scene scanner.
+        /// </summary>
+        public SceneScanner Scanner => _scanner;
+
         #endregion
 
         #region Private Fields
 
         private LiveLinkServer _server;
         private SceneScanner _scanner;
+        private MCPToolHandler _mcpHandler;
         private Dictionary<string, GameObject> _prefabLookup;
-        private McpResourceMapper _mcpResourceMapper;
-        private List<McpTool> _mcpTools;
         private float _syncTimer = 0f;
         private float _cleanupTimer = 0f;
         private const float CLEANUP_INTERVAL = 1f;
@@ -134,7 +136,7 @@ namespace LiveLink
             MainThreadDispatcher.Initialize();
             InitializePrefabLookup();
             InitializeScanner();
-            InitializeMcp();
+            _mcpHandler = new MCPToolHandler(this);
         }
 
         private void Start()
@@ -214,142 +216,6 @@ namespace LiveLink
             };
         }
 
-                private void InitializeMcp()
-                {
-                        _mcpResourceMapper = new McpResourceMapper(_scanner);
-                        _mcpTools = BuildMcpTools();
-                }
-
-                private List<McpTool> BuildMcpTools()
-                {
-                        return new List<McpTool>
-                        {
-                                new McpTool
-                                {
-                                        Name = "spawn_object",
-                                        Description = "Instantiate a spawnable prefab in the active scene.",
-                                        InputSchema = BuildSpawnSchema(),
-                                        ReadOnly = false
-                                },
-                                new McpTool
-                                {
-                                        Name = "transform_object",
-                                        Description = "Update position, rotation or scale of an object.",
-                                        InputSchema = BuildTransformSchema(),
-                                        ReadOnly = false
-                                },
-                                new McpTool
-                                {
-                                        Name = "delete_object",
-                                        Description = "Delete an object by UUID.",
-                                        InputSchema = BuildDeleteSchema(),
-                                        ReadOnly = false
-                                },
-                                new McpTool
-                                {
-                                        Name = "set_object_parent",
-                                        Description = "Re-parent an object to a new parent or to the scene root.",
-                                        InputSchema = BuildSetParentSchema(),
-                                        ReadOnly = false
-                                },
-                                new McpTool
-                                {
-                                        Name = "set_object_active",
-                                        Description = "Toggle the active state of an object.",
-                                        InputSchema = BuildSetActiveSchema(),
-                                        ReadOnly = false
-                                },
-                                new McpTool
-                                {
-                                        Name = "rename_object",
-                                        Description = "Rename an object.",
-                                        InputSchema = BuildRenameSchema(),
-                                        ReadOnly = false
-                                }
-                        };
-                }
-
-                private static JObject BuildSpawnSchema()
-                {
-                        return JObject.Parse(@"{
-    \"type\": \"object\",
-    \"properties\": {
-        \"prefab_key\": { \"type\": \"string\", \"description\": \"Prefab name registered in LiveLinkManager\" },
-        \"id\": { \"type\": \"string\", \"description\": \"Optional UUID override\" },
-        \"position\": { \"type\": \"array\", \"items\": { \"type\": \"number\" }, \"minItems\": 3, \"maxItems\": 3 },
-        \"rotation\": { \"type\": \"array\", \"items\": { \"type\": \"number\" }, \"minItems\": 4, \"maxItems\": 4 },
-        \"scale\": { \"type\": \"array\", \"items\": { \"type\": \"number\" }, \"minItems\": 3, \"maxItems\": 3 },
-        \"parent_uuid\": { \"type\": \"string\" },
-        \"name\": { \"type\": \"string\" }
-    },
-    \"required\": [\"prefab_key\"]
-}");
-                }
-
-                private static JObject BuildTransformSchema()
-                {
-                        return JObject.Parse(@"{
-    \"type\": \"object\",
-    \"properties\": {
-        \"uuid\": { \"type\": \"string\" },
-        \"position\": { \"type\": \"array\", \"items\": { \"type\": \"number\" }, \"minItems\": 3, \"maxItems\": 3 },
-        \"rotation\": { \"type\": \"array\", \"items\": { \"type\": \"number\" }, \"minItems\": 4, \"maxItems\": 4 },
-        \"scale\": { \"type\": \"array\", \"items\": { \"type\": \"number\" }, \"minItems\": 3, \"maxItems\": 3 },
-        \"local\": { \"type\": \"boolean\", \"description\": \"Apply transform in local space\" }
-    },
-    \"required\": [\"uuid\"]
-}");
-                }
-
-                private static JObject BuildDeleteSchema()
-                {
-                        return JObject.Parse(@"{
-    \"type\": \"object\",
-    \"properties\": {
-        \"uuid\": { \"type\": \"string\" },
-        \"include_children\": { \"type\": \"boolean\" }
-    },
-    \"required\": [\"uuid\"]
-}");
-                }
-
-                private static JObject BuildSetParentSchema()
-                {
-                        return JObject.Parse(@"{
-    \"type\": \"object\",
-    \"properties\": {
-        \"uuid\": { \"type\": \"string\" },
-        \"parent_uuid\": { \"type\": \"string\", \"description\": \"Leave empty or null to unparent\" },
-        \"world_position_stays\": { \"type\": \"boolean\" }
-    },
-    \"required\": [\"uuid\"]
-}");
-                }
-
-                private static JObject BuildSetActiveSchema()
-                {
-                        return JObject.Parse(@"{
-    \"type\": \"object\",
-    \"properties\": {
-        \"uuid\": { \"type\": \"string\" },
-        \"active\": { \"type\": \"boolean\" }
-    },
-    \"required\": [\"uuid\", \"active\"]
-}");
-                }
-
-                private static JObject BuildRenameSchema()
-                {
-                        return JObject.Parse(@"{
-    \"type\": \"object\",
-    \"properties\": {
-        \"uuid\": { \"type\": \"string\" },
-        \"name\": { \"type\": \"string\" }
-    },
-    \"required\": [\"uuid\", \"name\"]
-}");
-                }
-
         #endregion
 
         #region Server Control
@@ -419,8 +285,15 @@ namespace LiveLink
 
         private void ProcessCommand(string message, WebSocketConnection client)
         {
-            if (TryHandleMcp(message, client))
+            // Try MCP first
+            var mcpRequest = PacketSerializer.ParseMCPRequest(message);
+            if (mcpRequest != null)
             {
+                var mcpResponse = _mcpHandler.HandleRequest(mcpRequest);
+                if (mcpResponse != null)
+                {
+                    SendToClient(client, PacketSerializer.Serialize(mcpResponse));
+                }
                 return;
             }
 
@@ -446,48 +319,26 @@ namespace LiveLink
 
             try
             {
-                switch (command.Type.ToLowerInvariant())
+                ResponsePacket response = ExecuteCommandInternal(command);
+                
+                // Special handling for scene dump to maintain backward compatibility
+                if (command.Type.ToLowerInvariant() == "scene_dump" || 
+                    command.Type.ToLowerInvariant() == "get_scene" || 
+                    command.Type.ToLowerInvariant() == "refresh")
                 {
-                    case "spawn":
-                        HandleSpawn(command, client);
-                        break;
-
-                    case "transform":
-                    case "move":
-                        HandleTransform(command, client);
-                        break;
-
-                    case "delete":
-                    case "destroy":
-                        HandleDelete(command, client);
-                        break;
-
-                    case "rename":
-                        HandleRename(command, client);
-                        break;
-
-                    case "set_parent":
-                    case "reparent":
-                        HandleSetParent(command, client);
-                        break;
-
-                    case "set_active":
-                        HandleSetActive(command, client);
-                        break;
-
-                    case "scene_dump":
-                    case "get_scene":
-                    case "refresh":
-                        HandleSceneDump(command, client);
-                        break;
-
-                    case "ping":
-                        SendResponse(client, ResponsePacket.Ok("pong", requestId));
-                        break;
-
-                    default:
-                        SendResponse(client, ResponsePacket.Error($"Unknown command type: {command.Type}", requestId));
-                        break;
+                    var payload = command.GetPayload<RequestSceneDumpPayload>();
+                    bool includeInactive = payload?.IncludeInactive ?? _includeInactive;
+                    _scanner.IncludeInactive = includeInactive;
+                    var sceneDump = _scanner.ScanFullScene();
+                    SendToClient(client, PacketSerializer.Serialize(sceneDump));
+                }
+                else if (command.Type.ToLowerInvariant() == "ping")
+                {
+                    SendResponse(client, ResponsePacket.Ok("pong", requestId));
+                }
+                else
+                {
+                    SendResponse(client, response);
                 }
             }
             catch (Exception ex)
@@ -497,276 +348,86 @@ namespace LiveLink
             }
         }
 
-        #endregion
-
-        #region MCP Handling
-
-        private bool TryHandleMcp(string message, WebSocketConnection client)
+        internal ResponsePacket ExecuteCommandInternal(CommandPacket command)
         {
-            JObject raw;
-            try
+            switch (command.Type.ToLowerInvariant())
             {
-                raw = JObject.Parse(message);
-            }
-            catch
-            {
-                return false; // Not MCP / JSON-RPC
-            }
+                case "spawn":
+                    return HandleSpawn(command);
 
-            string jsonrpc = raw.Value<string>("jsonrpc");
-            if (!string.Equals(jsonrpc, McpJsonRpc.Version, StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
+                case "transform":
+                case "move":
+                    return HandleTransform(command);
 
-            var request = raw.ToObject<JsonRpcRequest>();
-            if (request == null || string.IsNullOrEmpty(request.Method))
-            {
-                SendJsonRpcResponse(client, McpJsonRpc.Error(null, -32600, "Invalid MCP request"));
-                return true;
-            }
+                case "delete":
+                case "destroy":
+                    return HandleDelete(command);
 
-            try
-            {
-                switch (request.Method)
-                {
-                    case "resources/list":
-                        HandleMcpResourceList(request, client);
-                        break;
-                    case "resources/read":
-                        HandleMcpResourceRead(request, client);
-                        break;
-                    case "tools/list":
-                        HandleMcpToolsList(request, client);
-                        break;
-                    case "tools/call":
-                        HandleMcpToolsCall(request, client);
-                        break;
-                    case "ping":
-                        SendJsonRpcResponse(client, McpJsonRpc.Success(request.Id, new JObject { ["message"] = "pong" }));
-                        break;
-                    default:
-                        SendJsonRpcResponse(client, McpJsonRpc.Error(request.Id, -32601, $"Unknown MCP method: {request.Method}"));
-                        break;
-                }
-            }
-            catch (Exception ex)
-            {
-                SendJsonRpcResponse(client, McpJsonRpc.Error(request.Id, -32603, ex.Message));
-            }
+                case "rename":
+                    return HandleRename(command);
 
-            return true;
-        }
+                case "set_parent":
+                case "reparent":
+                    return HandleSetParent(command);
 
-        private void HandleMcpResourceList(JsonRpcRequest request, WebSocketConnection client)
-        {
-            var sceneDump = _scanner.ScanFullScene();
-            var resources = _mcpResourceMapper.BuildResources(sceneDump);
-            var result = new JObject { ["resources"] = JArray.FromObject(resources) };
-            SendJsonRpcResponse(client, McpJsonRpc.Success(request.Id, result));
-        }
+                case "set_active":
+                    return HandleSetActive(command);
 
-        private void HandleMcpResourceRead(JsonRpcRequest request, WebSocketConnection client)
-        {
-            string uri = request.Params?.Value<string>("uri");
-            if (string.IsNullOrEmpty(uri))
-            {
-                SendJsonRpcResponse(client, McpJsonRpc.Error(request.Id, -32602, "Missing resource uri"));
-                return;
-            }
-
-            if (!_mcpResourceMapper.TryBuildContent(uri, out McpContent content))
-            {
-                SendJsonRpcResponse(client, McpJsonRpc.Error(request.Id, -32004, "Resource not found"));
-                return;
-            }
-
-            var result = new JObject
-            {
-                ["contents"] = new JArray(JObject.FromObject(content))
-            };
-
-            SendJsonRpcResponse(client, McpJsonRpc.Success(request.Id, result));
-        }
-
-        private void HandleMcpToolsList(JsonRpcRequest request, WebSocketConnection client)
-        {
-            var result = new JObject { ["tools"] = JArray.FromObject(_mcpTools) };
-            SendJsonRpcResponse(client, McpJsonRpc.Success(request.Id, result));
-        }
-
-        private void HandleMcpToolsCall(JsonRpcRequest request, WebSocketConnection client)
-        {
-            string toolName = request.Params?.Value<string>("name");
-            var arguments = request.Params != null ? request.Params["arguments"] as JObject : null;
-            arguments ??= new JObject();
-
-            if (string.IsNullOrEmpty(toolName))
-            {
-                SendJsonRpcResponse(client, McpJsonRpc.Error(request.Id, -32602, "Missing tool name"));
-                return;
-            }
-
-            if (!ExecuteMcpTool(toolName, arguments, out JObject toolResult, out string errorMessage, out int errorCode))
-            {
-                SendJsonRpcResponse(client, McpJsonRpc.Error(request.Id, errorCode, errorMessage ?? "Tool execution failed"));
-                return;
-            }
-
-            SendJsonRpcResponse(client, McpJsonRpc.Success(request.Id, toolResult ?? new JObject()));
-        }
-
-        private bool ExecuteMcpTool(string toolName, JObject arguments, out JObject result, out string errorMessage, out int errorCode)
-        {
-            result = null;
-            errorMessage = null;
-            errorCode = -32002;
-
-            switch (toolName.ToLowerInvariant())
-            {
-                case "spawn_object":
-                    var spawnPayload = arguments?.ToObject<SpawnPayload>();
-                    if (!TrySpawn(spawnPayload, out string spawnedUuid, out GameObject spawned, out string spawnError))
-                    {
-                        errorMessage = spawnError;
-                        errorCode = -32602;
-                        return false;
-                    }
-
-                    result = new JObject
-                    {
-                        ["uuid"] = spawnedUuid,
-                        ["name"] = spawned?.name
-                    };
-                    return true;
-
-                case "transform_object":
-                    var transformPayload = arguments?.ToObject<TransformPayload>();
-                    if (!TryTransform(transformPayload, out string transformError))
-                    {
-                        errorMessage = transformError;
-                        errorCode = -32602;
-                        return false;
-                    }
-
-                    result = new JObject { ["uuid"] = transformPayload?.UUID };
-                    return true;
-
-                case "delete_object":
-                    var deletePayload = arguments?.ToObject<DeletePayload>();
-                    if (!TryDelete(deletePayload, true, out string deleteError))
-                    {
-                        errorMessage = deleteError;
-                        errorCode = -32602;
-                        return false;
-                    }
-
-                    result = new JObject { ["uuid"] = deletePayload?.UUID };
-                    return true;
-
-                case "set_object_parent":
-                    var setParentPayload = arguments?.ToObject<SetParentPayload>();
-                    if (!TrySetParent(setParentPayload, out string parentError))
-                    {
-                        errorMessage = parentError;
-                        errorCode = -32602;
-                        return false;
-                    }
-
-                    result = new JObject
-                    {
-                        ["uuid"] = setParentPayload?.UUID,
-                        ["parent_uuid"] = setParentPayload?.ParentUUID
-                    };
-                    return true;
-
-                case "set_object_active":
-                    var setActivePayload = arguments?.ToObject<SetActivePayload>();
-                    if (!TrySetActive(setActivePayload, out string activeError))
-                    {
-                        errorMessage = activeError;
-                        errorCode = -32602;
-                        return false;
-                    }
-
-                    result = new JObject
-                    {
-                        ["uuid"] = setActivePayload?.UUID,
-                        ["active"] = setActivePayload?.Active ?? false
-                    };
-                    return true;
-
-                case "rename_object":
-                    var renamePayload = arguments?.ToObject<RenamePayload>();
-                    if (!TryRename(renamePayload, out string renameError))
-                    {
-                        errorMessage = renameError;
-                        errorCode = -32602;
-                        return false;
-                    }
-
-                    result = new JObject
-                    {
-                        ["uuid"] = renamePayload?.UUID,
-                        ["name"] = renamePayload?.Name
-                    };
-                    return true;
+                case "scene_dump":
+                case "get_scene":
+                case "refresh":
+                    // For internal use, we return the dump in the response data
+                    var payload = command.GetPayload<RequestSceneDumpPayload>();
+                    _scanner.IncludeInactive = payload?.IncludeInactive ?? _includeInactive;
+                    var sceneDump = _scanner.ScanFullScene();
+                    return ResponsePacket.Ok("Scene dump", command.RequestId, JObject.FromObject(sceneDump.Payload));
 
                 default:
-                    errorMessage = $"Unknown tool: {toolName}";
-                    errorCode = -32601;
-                    return false;
+                    return ResponsePacket.Error($"Unknown command type: {command.Type}", command.RequestId);
             }
-        }
-
-        private void SendJsonRpcResponse(WebSocketConnection client, JsonRpcResponse response)
-        {
-            if (client == null || response == null) return;
-            string json = JsonConvert.SerializeObject(response, Formatting.None);
-            SendToClient(client, json);
         }
 
         #endregion
 
         #region Command Handlers
 
-        private bool TrySpawn(SpawnPayload payload, out string uuid, out GameObject spawned, out string errorMessage)
+        private ResponsePacket HandleSpawn(CommandPacket command, WebSocketConnection client = null)
         {
-            uuid = null;
-            spawned = null;
-            errorMessage = null;
-
+            var payload = command.GetPayload<SpawnPayload>();
             if (payload == null || string.IsNullOrEmpty(payload.PrefabKey))
             {
-                errorMessage = "Missing prefab_key";
-                return false;
+                return ResponsePacket.Error("Missing prefab_key", command.RequestId);
             }
 
             if (!_prefabLookup.TryGetValue(payload.PrefabKey, out GameObject prefab))
             {
-                errorMessage = $"Prefab not found: {payload.PrefabKey}";
-                return false;
+                return ResponsePacket.Error($"Prefab not found: {payload.PrefabKey}", command.RequestId);
             }
 
+            // Parse position
             Vector3 position = Vector3.zero;
             if (payload.Position != null && payload.Position.Length >= 3)
             {
                 position = new Vector3(payload.Position[0], payload.Position[1], payload.Position[2]);
             }
 
+            // Parse rotation
             Quaternion rotation = Quaternion.identity;
             if (payload.Rotation != null && payload.Rotation.Length >= 4)
             {
                 rotation = new Quaternion(payload.Rotation[0], payload.Rotation[1], payload.Rotation[2], payload.Rotation[3]);
             }
 
-            spawned = Instantiate(prefab, position, rotation);
+            // Spawn
+            GameObject spawned = Instantiate(prefab, position, rotation);
 
+            // Set name if provided
             if (!string.IsNullOrEmpty(payload.Name))
             {
                 spawned.name = payload.Name;
             }
 
+            // Set parent if provided
             if (!string.IsNullOrEmpty(payload.ParentUUID))
             {
                 var parent = _scanner.GetGameObjectByUUID(payload.ParentUUID);
@@ -776,9 +437,11 @@ namespace LiveLink
                 }
             }
 
-            uuid = !string.IsNullOrEmpty(payload.Id) ? payload.Id : Guid.NewGuid().ToString("N").Substring(0, 12);
+            // Register with UUID
+            string uuid = !string.IsNullOrEmpty(payload.Id) ? payload.Id : Guid.NewGuid().ToString("N").Substring(0, 12);
             _scanner.RegisterWithUUID(spawned, uuid);
 
+            // Apply scale if provided
             if (payload.Scale != null && payload.Scale.Length >= 3)
             {
                 spawned.transform.localScale = new Vector3(payload.Scale[0], payload.Scale[1], payload.Scale[2]);
@@ -786,6 +449,7 @@ namespace LiveLink
 
             Debug.Log($"[LiveLink] Spawned '{prefab.name}' with UUID: {uuid}");
 
+            // Send notification
             var notification = new ObjectSpawnedPacket
             {
                 UUID = uuid,
@@ -794,24 +458,27 @@ namespace LiveLink
             };
             Broadcast(PacketSerializer.Serialize(notification));
 
-            return true;
+            // Send success response
+            var responseData = new JObject
+            {
+                ["uuid"] = uuid,
+                ["name"] = spawned.name
+            };
+            return ResponsePacket.Ok("Object spawned", command.RequestId, responseData);
         }
 
-        private bool TryTransform(TransformPayload payload, out string errorMessage)
+        private ResponsePacket HandleTransform(CommandPacket command)
         {
-            errorMessage = null;
-
+            var payload = command.GetPayload<TransformPayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
             {
-                errorMessage = "Missing uuid";
-                return false;
+                return ResponsePacket.Error("Missing uuid", command.RequestId);
             }
 
             var obj = _scanner.GetGameObjectByUUID(payload.UUID);
             if (obj == null)
             {
-                errorMessage = $"Object not found: {payload.UUID}";
-                return false;
+                return ResponsePacket.Error($"Object not found: {payload.UUID}", command.RequestId);
             }
 
             Transform transform = obj.transform;
@@ -839,82 +506,66 @@ namespace LiveLink
                 transform.localScale = new Vector3(payload.Scale[0], payload.Scale[1], payload.Scale[2]);
             }
 
-            return true;
+            return ResponsePacket.Ok("Transform updated", command.RequestId);
         }
 
-        private bool TryDelete(DeletePayload payload, bool broadcast, out string errorMessage)
+        private ResponsePacket HandleDelete(CommandPacket command)
         {
-            errorMessage = null;
-
+            var payload = command.GetPayload<DeletePayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
             {
-                errorMessage = "Missing uuid";
-                return false;
+                return ResponsePacket.Error("Missing uuid", command.RequestId);
             }
 
             var obj = _scanner.GetGameObjectByUUID(payload.UUID);
             if (obj == null)
             {
-                errorMessage = $"Object not found: {payload.UUID}";
-                return false;
+                return ResponsePacket.Error($"Object not found: {payload.UUID}", command.RequestId);
             }
 
+            string uuid = payload.UUID;
             _scanner.Unregister(obj);
             Destroy(obj);
 
-            Debug.Log($"[LiveLink] Deleted object with UUID: {payload.UUID}");
+            Debug.Log($"[LiveLink] Deleted object with UUID: {uuid}");
 
-            if (broadcast)
-            {
-                var notification = new ObjectDestroyedPacket { UUID = payload.UUID };
-                Broadcast(PacketSerializer.Serialize(notification));
-            }
+            // Send notification
+            var notification = new ObjectDestroyedPacket { UUID = uuid };
+            Broadcast(PacketSerializer.Serialize(notification));
 
-            return true;
+            return ResponsePacket.Ok("Object deleted", command.RequestId);
         }
 
-        private bool TryRename(RenamePayload payload, out string errorMessage)
+        private ResponsePacket HandleRename(CommandPacket command)
         {
-            errorMessage = null;
-
+            var payload = command.GetPayload<RenamePayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
             {
-                errorMessage = "Missing uuid";
-                return false;
+                return ResponsePacket.Error("Missing uuid", command.RequestId);
             }
 
             var obj = _scanner.GetGameObjectByUUID(payload.UUID);
             if (obj == null)
             {
-                errorMessage = $"Object not found: {payload.UUID}";
-                return false;
+                return ResponsePacket.Error($"Object not found: {payload.UUID}", command.RequestId);
             }
 
-            if (string.IsNullOrEmpty(payload.Name))
-            {
-                errorMessage = "Missing name";
-                return false;
-            }
-
-            obj.name = payload.Name;
-            return true;
+            obj.name = payload.Name ?? "Renamed Object";
+            return ResponsePacket.Ok("Object renamed", command.RequestId);
         }
 
-        private bool TrySetParent(SetParentPayload payload, out string errorMessage)
+        private ResponsePacket HandleSetParent(CommandPacket command)
         {
-            errorMessage = null;
-
+            var payload = command.GetPayload<SetParentPayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
             {
-                errorMessage = "Missing uuid";
-                return false;
+                return ResponsePacket.Error("Missing uuid", command.RequestId);
             }
 
             var obj = _scanner.GetGameObjectByUUID(payload.UUID);
             if (obj == null)
             {
-                errorMessage = $"Object not found: {payload.UUID}";
-                return false;
+                return ResponsePacket.Error($"Object not found: {payload.UUID}", command.RequestId);
             }
 
             Transform newParent = null;
@@ -923,126 +574,31 @@ namespace LiveLink
                 var parentObj = _scanner.GetGameObjectByUUID(payload.ParentUUID);
                 if (parentObj == null)
                 {
-                    errorMessage = $"Parent not found: {payload.ParentUUID}";
-                    return false;
+                    return ResponsePacket.Error($"Parent not found: {payload.ParentUUID}", command.RequestId);
                 }
                 newParent = parentObj.transform;
             }
 
             obj.transform.SetParent(newParent, payload.WorldPositionStays);
-            return true;
+            return ResponsePacket.Ok("Parent changed", command.RequestId);
         }
 
-        private bool TrySetActive(SetActivePayload payload, out string errorMessage)
+        private ResponsePacket HandleSetActive(CommandPacket command)
         {
-            errorMessage = null;
-
+            var payload = command.GetPayload<SetActivePayload>();
             if (payload == null || string.IsNullOrEmpty(payload.UUID))
             {
-                errorMessage = "Missing uuid";
-                return false;
+                return ResponsePacket.Error("Missing uuid", command.RequestId);
             }
 
             var obj = _scanner.GetGameObjectByUUID(payload.UUID);
             if (obj == null)
             {
-                errorMessage = $"Object not found: {payload.UUID}";
-                return false;
+                return ResponsePacket.Error($"Object not found: {payload.UUID}", command.RequestId);
             }
 
             obj.SetActive(payload.Active);
-            return true;
-        }
-
-        private void HandleSpawn(CommandPacket command, WebSocketConnection client)
-        {
-            var payload = command.GetPayload<SpawnPayload>();
-            if (!TrySpawn(payload, out string uuid, out GameObject spawned, out string errorMessage))
-            {
-                SendResponse(client, ResponsePacket.Error(errorMessage ?? "Spawn failed", command.RequestId));
-                return;
-            }
-
-            var responseData = new JObject
-            {
-                ["uuid"] = uuid,
-                ["name"] = spawned?.name
-            };
-            SendResponse(client, ResponsePacket.Ok("Object spawned", command.RequestId, responseData));
-        }
-
-        private void HandleTransform(CommandPacket command, WebSocketConnection client)
-        {
-            var payload = command.GetPayload<TransformPayload>();
-            if (!TryTransform(payload, out string errorMessage))
-            {
-                SendResponse(client, ResponsePacket.Error(errorMessage ?? "Transform failed", command.RequestId));
-                return;
-            }
-
-            SendResponse(client, ResponsePacket.Ok("Transform updated", command.RequestId));
-        }
-
-        private void HandleDelete(CommandPacket command, WebSocketConnection client)
-        {
-            var payload = command.GetPayload<DeletePayload>();
-            if (!TryDelete(payload, true, out string errorMessage))
-            {
-                SendResponse(client, ResponsePacket.Error(errorMessage ?? "Delete failed", command.RequestId));
-                return;
-            }
-
-            SendResponse(client, ResponsePacket.Ok("Object deleted", command.RequestId));
-        }
-
-        private void HandleRename(CommandPacket command, WebSocketConnection client)
-        {
-            var payload = command.GetPayload<RenamePayload>();
-            if (!TryRename(payload, out string errorMessage))
-            {
-                SendResponse(client, ResponsePacket.Error(errorMessage ?? "Rename failed", command.RequestId));
-                return;
-            }
-
-            SendResponse(client, ResponsePacket.Ok("Object renamed", command.RequestId));
-        }
-
-        private void HandleSetParent(CommandPacket command, WebSocketConnection client)
-        {
-            var payload = command.GetPayload<SetParentPayload>();
-            if (!TrySetParent(payload, out string errorMessage))
-            {
-                SendResponse(client, ResponsePacket.Error(errorMessage ?? "Set parent failed", command.RequestId));
-                return;
-            }
-
-            SendResponse(client, ResponsePacket.Ok("Parent changed", command.RequestId));
-        }
-
-        private void HandleSetActive(CommandPacket command, WebSocketConnection client)
-        {
-            var payload = command.GetPayload<SetActivePayload>();
-            if (!TrySetActive(payload, out string errorMessage))
-            {
-                SendResponse(client, ResponsePacket.Error(errorMessage ?? "Set active failed", command.RequestId));
-                return;
-            }
-
-            SendResponse(client, ResponsePacket.Ok($"Object {(payload.Active ? "activated" : "deactivated")}", command.RequestId));
-        }
-
-        private void HandleSceneDump(CommandPacket command, WebSocketConnection client)
-        {
-            var payload = command.GetPayload<RequestSceneDumpPayload>();
-            bool includeInactive = payload?.IncludeInactive ?? _includeInactive;
-
-            _scanner.IncludeInactive = includeInactive;
-            var sceneDump = _scanner.ScanFullScene();
-
-            string json = PacketSerializer.Serialize(sceneDump);
-            SendToClient(client, json);
-
-            Debug.Log($"[LiveLink] Sent scene dump: {sceneDump.Payload.ObjectCount} objects");
+            return ResponsePacket.Ok($"Object {(payload.Active ? "activated" : "deactivated")}", command.RequestId);
         }
 
         #endregion
@@ -1135,7 +691,7 @@ namespace LiveLink
             // Clean up if needed
         }
 
-        private SceneObjectDTO CreateSceneObjectDTO(GameObject obj, string uuid)
+        internal SceneObjectDTO CreateSceneObjectDTO(GameObject obj, string uuid)
         {
             string parentUuid = null;
             if (obj.transform.parent != null)

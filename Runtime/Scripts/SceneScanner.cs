@@ -321,6 +321,23 @@ namespace LiveLink
         }
 
         /// <summary>
+        /// Gets all objects in the scene as DTOs.
+        /// </summary>
+        public List<SceneObjectDTO> GetSceneObjects(bool includeInactive)
+        {
+            var result = new List<SceneObjectDTO>();
+            foreach (var kvp in _uuidToGameObject)
+            {
+                if (kvp.Value != null && (includeInactive || kvp.Value.activeInHierarchy))
+                {
+                    string parentUuid = kvp.Value.transform.parent != null ? GetOrCreateUUID(kvp.Value.transform.parent.gameObject) : null;
+                    result.Add(CreateDTO(kvp.Value.transform, parentUuid));
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
         /// Cleans up references to destroyed objects.
         /// </summary>
         public void CleanupDestroyedObjects()

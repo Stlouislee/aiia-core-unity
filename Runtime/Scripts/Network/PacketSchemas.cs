@@ -379,6 +379,65 @@ namespace LiveLink.Network
 
     #endregion
 
+    #region MCP Protocol (JSON-RPC 2.0)
+
+    /// <summary>
+    /// Base class for MCP JSON-RPC 2.0 messages.
+    /// </summary>
+    [Serializable]
+    public class MCPBaseMessage
+    {
+        [JsonProperty("jsonrpc")]
+        public string JsonRpc { get; set; } = "2.0";
+
+        [JsonProperty("id")]
+        public object Id { get; set; }
+    }
+
+    /// <summary>
+    /// MCP Request message.
+    /// </summary>
+    [Serializable]
+    public class MCPRequest : MCPBaseMessage
+    {
+        [JsonProperty("method")]
+        public string Method { get; set; }
+
+        [JsonProperty("params")]
+        public JObject Params { get; set; }
+    }
+
+    /// <summary>
+    /// MCP Response message.
+    /// </summary>
+    [Serializable]
+    public class MCPResponse : MCPBaseMessage
+    {
+        [JsonProperty("result")]
+        public object Result { get; set; }
+
+        [JsonProperty("error")]
+        public MCPError Error { get; set; }
+    }
+
+    /// <summary>
+    /// MCP Error object.
+    /// </summary>
+    [Serializable]
+    public class MCPError
+    {
+        [JsonProperty("code")]
+        public int Code { get; set; }
+
+        [JsonProperty("message")]
+        public string Message { get; set; }
+
+        [JsonProperty("data")]
+        public object Data { get; set; }
+    }
+
+    #endregion
+
     #region Serialization Helpers
 
     /// <summary>
@@ -407,6 +466,23 @@ namespace LiveLink.Network
             try
             {
                 return JsonConvert.DeserializeObject<CommandPacket>(json);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static MCPRequest ParseMCPRequest(string json)
+        {
+            try
+            {
+                var obj = JObject.Parse(json);
+                if (obj.ContainsKey("jsonrpc") && obj["jsonrpc"].ToString() == "2.0" && obj.ContainsKey("method"))
+                {
+                    return obj.ToObject<MCPRequest>();
+                }
+                return null;
             }
             catch
             {
