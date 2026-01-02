@@ -22,6 +22,14 @@ namespace LiveLink
         private int _port = 8080;
 
         [SerializeField]
+        [Tooltip("Port number for the MCP HTTP server.")]
+        private int _mcpPort = 8081;
+
+        [SerializeField]
+        [Tooltip("Enable MCP HTTP server (HTTP + SSE transport).")]
+        private bool _enableMCPServer = true;
+
+        [SerializeField]
         [Tooltip("Automatically start the server when the component is enabled.")]
         private bool _autoStart = true;
 
@@ -120,6 +128,7 @@ namespace LiveLink
         #region Private Fields
 
         private LiveLinkServer _server;
+        private MCPHttpServer _mcpHttpServer;
         private SceneScanner _scanner;
         private MCPToolHandler _mcpHandler;
         private Dictionary<string, GameObject> _prefabLookup;
@@ -144,6 +153,10 @@ namespace LiveLink
             if (_autoStart)
             {
                 StartServer();
+                if (_enableMCPServer)
+                {
+                    StartMCPServer();
+                }
             }
         }
 
@@ -182,11 +195,13 @@ namespace LiveLink
         private void OnDisable()
         {
             StopServer();
+            StopMCPServer();
         }
 
         private void OnDestroy()
         {
             StopServer();
+            StopMCPServer();
         }
 
         #endregion
@@ -260,6 +275,33 @@ namespace LiveLink
         {
             StopServer();
             StartServer();
+        }
+
+        /// <summary>
+        /// Starts the MCP HTTP server.
+        /// </summary>
+        public void StartMCPServer()
+        {
+            if (_mcpHttpServer != null && _mcpHttpServer.IsRunning)
+            {
+                Debug.LogWarning("[LiveLink-MCP] HTTP server is already running.");
+                return;
+            }
+
+            _mcpHttpServer = new MCPHttpServer(_mcpHandler, _mcpPort);
+            _mcpHttpServer.Start();
+        }
+
+        /// <summary>
+        /// Stops the MCP HTTP server.
+        /// </summary>
+        public void StopMCPServer()
+        {
+            if (_mcpHttpServer != null)
+            {
+                _mcpHttpServer.Dispose();
+                _mcpHttpServer = null;
+            }
         }
 
         #endregion

@@ -44,6 +44,8 @@ https://github.com/Stlouislee/aiia-core-unity.git
 | Property | Description |
 |----------|-------------|
 | **Port** | WebSocket server port (default: 8080) |
+| **MCP Port** | MCP HTTP server port (default: 8081) |
+| **Enable MCP Server** | Enable HTTP + SSE transport for MCP protocol |
 | **Auto Start** | Start server automatically on Play |
 | **Scope** | `WholeScene` or `TargetObjectOnly` |
 | **Target Root** | Root object when using TargetObjectOnly scope |
