@@ -122,10 +122,9 @@ namespace LiveLink
                 return CreateErrorResponse(request.Id, -32601, $"Tool not supported: {toolName}");
 
             // Execute command via manager
-            // Note: We'll need to add a way to get the result back from LiveLinkManager
             var result = _manager.ExecuteCommandInternal(command);
             
-            if (result.Status == "ok")
+            if (result.Success)
             {
                 return CreateSuccessResponse(request.Id, new { 
                     content = new[] { 
