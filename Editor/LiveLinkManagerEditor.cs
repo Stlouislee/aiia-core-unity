@@ -17,6 +17,8 @@ namespace LiveLink.Editor
         private bool _showPrefabs = true;
 
         private SerializedProperty _port;
+        private SerializedProperty _mcpPort;
+        private SerializedProperty _enableMCPServer;
         private SerializedProperty _autoStart;
         private SerializedProperty _scope;
         private SerializedProperty _targetRoot;
@@ -32,6 +34,8 @@ namespace LiveLink.Editor
             _manager = (LiveLinkManager)target;
 
             _port = serializedObject.FindProperty("_port");
+            _mcpPort = serializedObject.FindProperty("_mcpPort");
+            _enableMCPServer = serializedObject.FindProperty("_enableMCPServer");
             _autoStart = serializedObject.FindProperty("_autoStart");
             _scope = serializedObject.FindProperty("_scope");
             _targetRoot = serializedObject.FindProperty("_targetRoot");
@@ -50,6 +54,9 @@ namespace LiveLink.Editor
             InitStyles();
             
             DrawStatusBox();
+            EditorGUILayout.Space(10);
+            
+            DrawMCPStatusBox();
             EditorGUILayout.Space(10);
             
             DrawServerControls();
@@ -144,6 +151,79 @@ namespace LiveLink.Editor
             EditorGUILayout.EndVertical();
         }
 
+        private void DrawMCPStatusBox()
+        {
+            EditorGUILayout.BeginVertical(_boxStyle);
+            
+            EditorGUILayout.LabelField("MCP Server Status", EditorStyles.boldLabel);
+            EditorGUILayout.Space(5);
+
+            bool isMCPEnabled = _enableMCPServer.boolValue;
+            bool isMCPRunning = Application.isPlaying && isMCPEnabled && _manager.IsServerRunning;
+            
+            // Check if MCP server is actually running using reflection
+            var mcpServerField = typeof(LiveLinkManager).GetField("_mcpHttpServer", 
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            object mcpServer = mcpServerField?.GetValue(_manager);
+            if (mcpServer != null)
+            {
+                var isRunningProp = mcpServer.GetType().GetProperty("IsRunning");
+                isMCPRunning = Application.isPlaying && (bool)isRunningProp.GetValue(mcpServer);
+            }
+            else
+            {
+                isMCPRunning = false;
+            }
+
+            // Status indicator
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Server:", GUILayout.Width(60));
+            
+            Color originalColor = GUI.color;
+            if (isMCPRunning)
+            {
+                GUI.color = Color.green;
+                EditorGUILayout.LabelField("● Running", _statusStyle);
+            }
+            else if (!isMCPEnabled)
+            {
+                GUI.color = Color.gray;
+                EditorGUILayout.LabelField("● Disabled", _statusStyle);
+            }
+            else
+            {
+                GUI.color = Application.isPlaying ? Color.red : Color.gray;
+                EditorGUILayout.LabelField(Application.isPlaying ? "● Stopped" : "● Not Playing", _statusStyle);
+            }
+            GUI.color = originalColor;
+            EditorGUILayout.EndHorizontal();
+
+            // Port info
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Port:", GUILayout.Width(60));
+            EditorGUILayout.LabelField(_mcpPort.intValue.ToString());
+            EditorGUILayout.EndHorizontal();
+
+            // Transport info
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Transport:", GUILayout.Width(60));
+            EditorGUILayout.LabelField("HTTP + SSE");
+            EditorGUILayout.EndHorizontal();
+
+            if (isMCPRunning)
+            {
+                EditorGUILayout.Space(5);
+                EditorGUILayout.HelpBox($"MCP Endpoint: http://localhost:{_mcpPort.intValue}/mcp\nSSE Endpoint: http://localhost:{_mcpPort.intValue}/sse", MessageType.Info);
+            }
+            else if (!isMCPEnabled && Application.isPlaying)
+            {
+                EditorGUILayout.Space(5);
+                EditorGUILayout.HelpBox("MCP server is disabled. Enable it in Server Configuration.", MessageType.Warning);
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
         private void DrawServerControls()
         {
             if (!Application.isPlaying)
@@ -169,6 +249,38 @@ namespace LiveLink.Editor
             GUI.enabled = true;
             EditorGUILayout.EndHorizontal();
 
+            // MCP Server Controls
+            if (_enableMCPServer.boolValue)
+            {
+                EditorGUILayout.Space(5);
+                EditorGUILayout.BeginHorizontal();
+
+                var mcpServerField = typeof(LiveLinkManager).GetField("_mcpHttpServer", 
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                object mcpServer = mcpServerField?.GetValue(_manager);
+                bool isMCPRunning = false;
+                if (mcpServer != null)
+                {
+                    var isRunningProp = mcpServer.GetType().GetProperty("IsRunning");
+                    isMCPRunning = (bool)isRunningProp.GetValue(mcpServer);
+                }
+
+                GUI.enabled = !isMCPRunning;
+                if (GUILayout.Button("Start MCP Server", GUILayout.Height(30)))
+                {
+                    _manager.StartMCPServer();
+                }
+
+                GUI.enabled = isMCPRunning;
+                if (GUILayout.Button("Stop MCP Server", GUILayout.Height(30)))
+                {
+                    _manager.StopMCPServer();
+                }
+
+                GUI.enabled = true;
+                EditorGUILayout.EndHorizontal();
+            }
+
             EditorGUILayout.Space(5);
 
             GUI.enabled = _manager.IsServerRunning && _manager.ClientCount > 0;
@@ -186,6 +298,8 @@ namespace LiveLink.Editor
             EditorGUI.BeginDisabledGroup(Application.isPlaying);
             
             EditorGUILayout.PropertyField(_port, new GUIContent("Port", "WebSocket server port"));
+            EditorGUILayout.PropertyField(_mcpPort, new GUIContent("MCP Port", "MCP HTTP server port"));
+            EditorGUILayout.PropertyField(_enableMCPServer, new GUIContent("Enable MCP Server", "Enable HTTP + SSE transport for MCP"));
             EditorGUILayout.PropertyField(_autoStart, new GUIContent("Auto Start", "Start server automatically on play"));
             
             EditorGUI.EndDisabledGroup();
