@@ -173,12 +173,28 @@ namespace LiveLink
             
             if (result.Success)
             {
-                return CreateSuccessResponse(request.Id, new { 
-                    content = new[] { 
-                        new { type = "text", text = $"Successfully executed {toolName}: {result.Message}" } 
-                    },
-                    isError = false
-                });
+                // For commands that return useful data, include it in the response
+                if (result.Data != null)
+                {
+                    string dataText = Newtonsoft.Json.JsonConvert.SerializeObject(result.Data, Newtonsoft.Json.Formatting.Indented);
+                    
+                    return CreateSuccessResponse(request.Id, new { 
+                        content = new[] { 
+                            new { type = "text", text = $"Successfully executed {toolName}: {result.Message}" },
+                            new { type = "text", text = $"Data: {dataText}" }
+                        },
+                        isError = false
+                    });
+                }
+                else
+                {
+                    return CreateSuccessResponse(request.Id, new { 
+                        content = new[] { 
+                            new { type = "text", text = $"Successfully executed {toolName}: {result.Message}" } 
+                        },
+                        isError = false
+                    });
+                }
             }
             else
             {
