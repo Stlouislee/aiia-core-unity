@@ -53,9 +53,9 @@ namespace LiveLink
             }
         }
 
-        private MCPResponse HandleInitialize(object id, JObject params)
+        private MCPResponse HandleInitialize(object id, JObject parameters)
         {
-            string protocolVersion = params?["protocolVersion"]?.ToString();
+            string protocolVersion = parameters?["protocolVersion"]?.ToString();
             Debug.Log($"[LiveLink-MCP] Initialize request - Protocol version: {protocolVersion}");
 
             // Return server capabilities
