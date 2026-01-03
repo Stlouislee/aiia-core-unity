@@ -176,7 +176,17 @@ namespace LiveLink
                 // For commands that return useful data, include it in the response
                 if (result.Data != null)
                 {
-                    string dataText = Newtonsoft.Json.JsonConvert.SerializeObject(result.Data, Newtonsoft.Json.Formatting.Indented);
+                    string dataText;
+                    
+                    // For scene_dump, create a simplified version to reduce context size
+                    if (toolName == "scene_dump")
+                    {
+                        dataText = CreateSimplifiedSceneDump(result.Data);
+                    }
+                    else
+                    {
+                        dataText = Newtonsoft.Json.JsonConvert.SerializeObject(result.Data, Newtonsoft.Json.Formatting.Indented);
+                    }
                     
                     return CreateSuccessResponse(request.Id, new { 
                         content = new[] { 
@@ -253,6 +263,46 @@ namespace LiveLink
                     } 
                 } 
             });
+        }
+
+        private string CreateSimplifiedSceneDump(Newtonsoft.Json.Linq.JObject data)
+        {
+            try
+            {
+                var simplifiedDump = new
+                {
+                    scene_name = data["scene_name"]?.ToString(),
+                    object_count = data["object_count"]?.Value<int>(),
+                    objects = new List<object>()
+                };
+
+                var objects = data["objects"] as Newtonsoft.Json.Linq.JArray;
+                if (objects != null)
+                {
+                    foreach (var obj in objects)
+                    {
+                        var simplifiedObject = new
+                        {
+                            uuid = obj["uuid"]?.ToString(),
+                            name = obj["name"]?.ToString(),
+                            parent_uuid = obj["parent_uuid"]?.ToString(),
+                            active = obj["active"]?.Value<bool>() ?? true,
+                            children_count = (obj["children"] as Newtonsoft.Json.Linq.JArray)?.Count ?? 0,
+                            // Simplified transform - only position
+                            position = obj["transform"]?["pos"]?.ToObject<float[]>() ?? new float[3]
+                        };
+                        simplifiedDump.objects.Add(simplifiedObject);
+                    }
+                }
+
+                return Newtonsoft.Json.JsonConvert.SerializeObject(simplifiedDump, Newtonsoft.Json.Formatting.Indented);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[LiveLink-MCP] Error creating simplified scene dump: {ex.Message}");
+                // Fallback to original data
+                return Newtonsoft.Json.JsonConvert.SerializeObject(data, Newtonsoft.Json.Formatting.Indented);
+            }
         }
 
         private CommandPacket MapToolToCommand(string toolName, JObject args)
