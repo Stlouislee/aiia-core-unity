@@ -29,6 +29,11 @@ namespace LiveLink
             {
                 switch (request.Method)
                 {
+                    case "initialize":
+                        return HandleInitialize(request.Id, request.Params);
+                    case "notifications/initialized":
+                        // Client is ready, no response needed
+                        return null;
                     case "tools/list":
                         return HandleListTools(request.Id);
                     case "tools/call":
@@ -46,6 +51,48 @@ namespace LiveLink
                 Debug.LogError($"[LiveLink-MCP] Error handling request {request.Method}: {ex.Message}");
                 return CreateErrorResponse(request.Id, -32603, $"Internal error: {ex.Message}");
             }
+        }
+
+        private MCPResponse HandleInitialize(object id, JObject params)
+        {
+            string protocolVersion = params?["protocolVersion"]?.ToString();
+            Debug.Log($"[LiveLink-MCP] Initialize request - Protocol version: {protocolVersion}");
+
+            // Return server capabilities
+            var serverCapabilities = new
+            {
+                resources = new
+                {
+                    subscribe = false
+                },
+                tools = new
+                {
+                    listChanged = true
+                },
+                prompts = new
+                {
+                    listChanged = false
+                },
+                logging = new
+                {
+                }
+            };
+
+            var serverInfo = new
+            {
+                name = "Unity LiveLink MCP Server",
+                version = "1.0.0",
+                description = "MCP server for Unity LiveLink - provides scene resources and tools",
+                websiteUrl = "https://github.com/Stlouislee/aiia-core-unity"
+            };
+
+            return CreateSuccessResponse(id, new
+            {
+                protocolVersion = "2024-11-05",
+                capabilities = serverCapabilities,
+                serverInfo = serverInfo,
+                instructions = "You can interact with Unity scene objects using the provided tools and resources."
+            });
         }
 
         private MCPResponse HandleListTools(object id)
@@ -130,12 +177,17 @@ namespace LiveLink
                     content = new[] { 
                         new { type = "text", text = $"Successfully executed {toolName}: {result.Message}" } 
                     },
-                    data = result.Data
+                    isError = false
                 });
             }
             else
             {
-                return CreateErrorResponse(request.Id, -32000, result.Message);
+                return CreateSuccessResponse(request.Id, new {
+                    content = new[] {
+                        new { type = "text", text = $"Error executing {toolName}: {result.Message}" }
+                    },
+                    isError = true
+                });
             }
         }
 
@@ -150,7 +202,7 @@ namespace LiveLink
                 resources.Add(new {
                     uri = MCPResourceMapper.GetResourceURI(sceneName, dto.UUID),
                     name = dto.Name,
-                    type = "GameObject",
+                    mimeType = "application/json",
                     description = $"Unity GameObject: {dto.Name} ({dto.UUID})"
                 });
             }

@@ -195,6 +195,9 @@ namespace LiveLink
         {
             try
             {
+                // Add MCP protocol version header
+                response.AddHeader("MCP-Protocol-Version", "2024-11-05");
+
                 // Read request body
                 string requestBody;
                 using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
@@ -240,6 +243,14 @@ namespace LiveLink
 
                 mcpResponse = await tcs.Task;
 
+                // For notifications (like initialized), no response is sent
+                if (mcpResponse == null)
+                {
+                    response.StatusCode = 204; // No Content
+                    response.Close();
+                    return;
+                }
+
                 // Send response
                 response.ContentType = "application/json";
                 response.StatusCode = 200;
@@ -260,6 +271,7 @@ namespace LiveLink
 
         private async Task HandleSSEConnectionAsync(HttpListenerResponse response)
         {
+            string sessionId = Guid.NewGuid().ToString("N");
             try
             {
                 // Set SSE headers
@@ -273,13 +285,12 @@ namespace LiveLink
                     _sseClients.Add(response);
                 }
 
-                Debug.Log("[LiveLink-MCP] SSE client connected");
+                Debug.Log($"[LiveLink-MCP] SSE client connected (Session: {sessionId})");
 
-                // Send initial connected event
-                await SendSSEEventAsync(response, "connected", JsonConvert.SerializeObject(new
-                {
-                    message = "Connected to Unity LiveLink MCP server"
-                }));
+                // Send initial endpoint event as per MCP spec
+                // The URI should be where the client sends POST requests
+                string endpointUri = $"/mcp?sessionId={sessionId}";
+                await SendSSEEventAsync(response, "endpoint", endpointUri);
 
                 // Keep connection alive
                 while (_isRunning)
@@ -287,10 +298,11 @@ namespace LiveLink
                     await Task.Delay(30000); // Send heartbeat every 30 seconds
                     if (_isRunning)
                     {
-                        await SendSSEEventAsync(response, "heartbeat", JsonConvert.SerializeObject(new
-                        {
-                            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-                        }));
+                        // Send a comment as heartbeat to keep connection alive without triggering events
+                        string heartbeat = ": heartbeat\n\n";
+                        byte[] buffer = Encoding.UTF8.GetBytes(heartbeat);
+                        await response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
+                        await response.OutputStream.FlushAsync();
                     }
                 }
             }

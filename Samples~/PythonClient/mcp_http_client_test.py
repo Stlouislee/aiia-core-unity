@@ -29,7 +29,54 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
             print(f"Status: {resp.status}")
             print(f"Response: {json.dumps(health, indent=2)}")
         
-        # 2. List Tools
+        # 2. Initialize (MCP requirement)
+        print("\n--- Initialize (MCP Protocol Handshake) ---")
+        init_request = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "Unity LiveLink Test Client",
+                    "version": "1.0.0"
+                }
+            }
+        }
+        async with session.post(f"{base_url}/mcp", json=init_request) as resp:
+            response = await resp.json()
+            print(f"Status: {resp.status}")
+            print(f"Response: {json.dumps(response, indent=2)}")
+            
+            if "error" in response:
+                print(f"Initialization failed: {response['error']}")
+                return
+            
+            if "result" not in response:
+                print("No result in initialize response")
+                return
+            
+            # Extract server capabilities
+            server_info = response["result"].get("serverInfo", {})
+            capabilities = response["result"].get("capabilities", {})
+            print(f"\nConnected to: {server_info.get('name', 'Unknown')} v{server_info.get('version', 'Unknown')}")
+            print(f"Server capabilities: {list(capabilities.keys())}")
+        
+        # 3. Send initialized notification (MCP requirement)
+        print("\n--- Send Initialized Notification ---")
+        initialized_notification = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }
+        async with session.post(f"{base_url}/mcp", json=initialized_notification) as resp:
+            print(f"Status: {resp.status}")
+            if resp.status == 204:
+                print("Initialized notification sent successfully")
+            else:
+                print(f"Unexpected status: {resp.status}")
+        
+        # 4. List Tools
         print("\n--- Testing tools/list ---")
         list_tools_request = {
             "jsonrpc": "2.0",
@@ -42,7 +89,7 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
             print(f"Status: {resp.status}")
             print(f"Response: {json.dumps(response, indent=2)}")
         
-        # 3. List Resources
+        # 5. List Resources
         print("\n--- Testing resources/list ---")
         list_resources_request = {
             "jsonrpc": "2.0",
@@ -55,7 +102,7 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
             print(f"Status: {resp.status}")
             print(f"Response: {json.dumps(response, indent=2)}")
         
-        # 4. Call Tool (Spawn)
+        # 6. Call Tool (Spawn)
         print("\n--- Testing tools/call (spawn_object) ---")
         spawn_request = {
             "jsonrpc": "2.0",
@@ -83,7 +130,7 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
                     uuid = data.get("uuid")
             
             if uuid:
-                # 5. Read Resource
+                # 7. Read Resource
                 print(f"\n--- Testing resources/read (for {uuid}) ---")
                 read_resource_request = {
                     "jsonrpc": "2.0",
@@ -98,7 +145,7 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
                     print(f"Status: {resp.status}")
                     print(f"Response: {json.dumps(response, indent=2)}")
                 
-                # 6. Call Tool (Transform)
+                # 8. Call Tool (Transform)
                 print(f"\n--- Testing tools/call (transform_object for {uuid}) ---")
                 transform_request = {
                     "jsonrpc": "2.0",
@@ -117,7 +164,7 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
                     print(f"Status: {resp.status}")
                     print(f"Response: {json.dumps(response, indent=2)}")
         
-        # 7. Test SSE (optional - just connect and receive a few events)
+        # 9. Test SSE (optional - just connect and receive a few events)
         print("\n--- Testing SSE Connection ---")
         print("Connecting to SSE endpoint...")
         try:
