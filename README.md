@@ -119,6 +119,91 @@ Example MCP request/response:
 
 See `mcp-config.example.json` for a ready-to-copy client config.
 
+### Available MCP Tools
+
+#### Core Scene Management
+
+**`spawn_object`** - Spawn a new object from a prefab
+```json
+{
+  "name": "spawn_object",
+  "arguments": {
+    "prefab_key": "Cube",
+    "position": [0, 1, 0],
+    "rotation": [0, 0, 0, 1],
+    "scale": [1, 1, 1],
+    "name": "My Cube",
+    "parent_uuid": "parent-uuid"
+  }
+}
+```
+
+**`transform_object`** - Update position, rotation, or scale
+```json
+{
+  "name": "transform_object",
+  "arguments": {
+    "uuid": "object-uuid",
+    "position": [10, 0, 10],
+    "rotation": [0, 0.5, 0, 0.866],
+    "scale": [2, 2, 2]
+  }
+}
+```
+
+**`delete_object`** - Delete an object from the scene
+```json
+{
+  "name": "delete_object",
+  "arguments": {
+    "uuid": "object-uuid"
+  }
+}
+```
+
+**`scene_dump`** - Get full scene hierarchy
+```json
+{
+  "name": "scene_dump",
+  "arguments": {
+    "include_inactive": false
+  }
+}
+```
+
+#### Context and Discovery
+
+**`list_spawnable_objects`** - Get available prefab names
+```json
+{
+  "name": "list_spawnable_objects",
+  "arguments": {}
+}
+```
+**Response:** `{"prefabs": ["Cube", "Sphere"], "count": 2}`
+
+**`get_view_context`** - Get camera/player perspective
+```json
+{
+  "name": "get_view_context",
+  "arguments": {
+    "camera_tag": "MainCamera",
+    "include_visible_objects": true,
+    "raycast_distance": 100
+  }
+}
+```
+**Returns:** Camera position, orientation, forward/right/up vectors, field of view, raycast hit info, and optionally visible objects.
+
+#### Planned Tools
+
+**`get_snapshot`** - Capture camera view as image (planned)
+- **Arguments:** `width`, `height`, `quality`, `format`, `camera_tag`
+- **Returns:** Base64-encoded image with metadata
+- **Cross-platform:** Windows, macOS, Linux, iOS, Android, VR, WebGL
+
+---
+
 ### Receiving Scene Data
 
 When a client connects, it receives a full scene dump:
