@@ -9,7 +9,8 @@
   "changelogUrl": "https://github.com/Stlouislee/aiia-core-unity/blob/main/CHANGELOG.md",
   "licensesUrl": "https://github.com/Stlouislee/aiia-core-unity/blob/main/LICENSE",
   "dependencies": {
-    "com.unity.nuget.newtonsoft-json": "3.0.2"
+    "com.unity.nuget.newtonsoft-json": "3.0.2",
+    "com.unity.cloud.gltfast": "6.1.0"
   },
   "keywords": [
     "livelink",

@@ -1,7 +1,9 @@
 {
     "name": "LiveLink",
     "rootNamespace": "LiveLink",
-    "references": [],
+    "references": [
+        "GLTFast"
+    ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,

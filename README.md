@@ -138,6 +138,34 @@ See `mcp-config.example.json` for a ready-to-copy client config.
 }
 ```
 
+**`spawn_gltf`** - Spawn a glTF asset at runtime (via Unity glTFast)
+
+Load from URL:
+```json
+{
+  "name": "spawn_gltf",
+  "arguments": {
+    "url": "https://example.com/model.glb",
+    "position": [0, 1, 0],
+    "rotation": [0, 0, 0, 1],
+    "scale": [1, 1, 1],
+    "name": "Imported glTF"
+  }
+}
+```
+
+Load from base64-encoded `.glb`:
+```json
+{
+  "name": "spawn_gltf",
+  "arguments": {
+    "data_base64": "<base64 glb bytes>",
+    "source_uri": "file:///memory.glb",
+    "name": "Imported glTF"
+  }
+}
+```
+
 **`transform_object`** - Update position, rotation, or scale
 ```json
 {

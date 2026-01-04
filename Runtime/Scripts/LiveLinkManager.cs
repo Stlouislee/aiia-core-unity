@@ -331,11 +331,7 @@ namespace LiveLink
             var mcpRequest = PacketSerializer.ParseMCPRequest(message);
             if (mcpRequest != null)
             {
-                var mcpResponse = _mcpHandler.HandleRequest(mcpRequest);
-                if (mcpResponse != null)
-                {
-                    SendToClient(client, PacketSerializer.Serialize(mcpResponse));
-                }
+                ProcessMcpRequestAsync(mcpRequest, client);
                 return;
             }
 
@@ -442,6 +438,28 @@ namespace LiveLink
         }
 
         #endregion
+
+        private async void ProcessMcpRequestAsync(MCPRequest request, WebSocketConnection client)
+        {
+            try
+            {
+                var response = await _mcpHandler.HandleRequestAsync(request);
+                if (response != null)
+                {
+                    SendToClient(client, PacketSerializer.Serialize(response));
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[LiveLink-MCP] Error processing MCP request: {ex.Message}\n{ex.StackTrace}");
+                var errorResponse = new MCPResponse
+                {
+                    Id = request?.Id,
+                    Error = new MCPError { Code = -32603, Message = $"Internal error: {ex.Message}" }
+                };
+                SendToClient(client, PacketSerializer.Serialize(errorResponse));
+            }
+        }
 
         #region Command Handlers
 
@@ -821,6 +839,11 @@ namespace LiveLink
                 Debug.Log($"[LiveLink] Broadcasting: {message.Substring(0, Math.Min(100, message.Length))}...");
             }
             _server?.Broadcast(message);
+        }
+
+        internal void BroadcastInternal(string message)
+        {
+            Broadcast(message);
         }
 
         private void SendToClient(WebSocketConnection client, string message)

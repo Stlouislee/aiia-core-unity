@@ -227,17 +227,21 @@ namespace LiveLink
                 MCPResponse mcpResponse = null;
                 var tcs = new TaskCompletionSource<MCPResponse>();
                 
-                MainThreadDispatcher.Enqueue(() =>
+                MainThreadDispatcher.Enqueue(async () =>
                 {
                     try
                     {
-                        mcpResponse = _mcpHandler.HandleRequest(mcpRequest);
+                        mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
                         tcs.SetResult(mcpResponse);
                     }
                     catch (Exception ex)
                     {
                         Debug.LogError($"[LiveLink-MCP] Error processing request: {ex.Message}");
-                        tcs.SetException(ex);
+                        tcs.SetResult(new MCPResponse
+                        {
+                            Id = mcpRequest?.Id,
+                            Error = new MCPError { Code = -32603, Message = $"Internal error: {ex.Message}" }
+                        });
                     }
                 });
 

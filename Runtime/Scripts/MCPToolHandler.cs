@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using LiveLink.Network;
 using UnityEngine;
+using GLTFast;
 
 namespace LiveLink
 {
@@ -25,6 +27,17 @@ namespace LiveLink
         {
             if (request == null) return null;
 
+            // NOTE: Prefer HandleRequestAsync. This synchronous entrypoint is kept for
+            // backward compatibility, but cannot safely execute long-running tasks.
+            if (request.Method == "tools/call")
+            {
+                string toolName = request.Params?["name"]?.ToString();
+                if (string.Equals(toolName, "spawn_gltf", StringComparison.OrdinalIgnoreCase))
+                {
+                    return CreateErrorResponse(request.Id, -32603, "spawn_gltf is asynchronous; call via HandleRequestAsync");
+                }
+            }
+
             try
             {
                 switch (request.Method)
@@ -38,6 +51,41 @@ namespace LiveLink
                         return HandleListTools(request.Id);
                     case "tools/call":
                         return HandleCallTool(request);
+                    case "resources/list":
+                        return HandleListResources(request.Id);
+                    case "resources/read":
+                        return HandleReadResource(request);
+                    default:
+                        return CreateErrorResponse(request.Id, -32601, $"Method not found: {request.Method}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[LiveLink-MCP] Error handling request {request.Method}: {ex.Message}");
+                return CreateErrorResponse(request.Id, -32603, $"Internal error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Processes an MCP request asynchronously. Required for tools that perform
+        /// runtime loading (e.g. glTF import).
+        /// </summary>
+        public async Task<MCPResponse> HandleRequestAsync(MCPRequest request)
+        {
+            if (request == null) return null;
+
+            try
+            {
+                switch (request.Method)
+                {
+                    case "initialize":
+                        return HandleInitialize(request.Id, request.Params);
+                    case "notifications/initialized":
+                        return null;
+                    case "tools/list":
+                        return HandleListTools(request.Id);
+                    case "tools/call":
+                        return await HandleCallToolAsync(request);
                     case "resources/list":
                         return HandleListResources(request.Id);
                     case "resources/read":
@@ -167,6 +215,24 @@ namespace LiveLink
                             camera_tag = new { type = "string", description = "Camera tag to query (default: 'MainCamera')" },
                             include_visible_objects = new { type = "boolean", description = "Include list of objects visible in camera frustum" },
                             raycast_distance = new { type = "number", description = "Distance to raycast from camera center (default: 100)" }
+                        }
+                    }
+                },
+                new {
+                    name = "spawn_gltf",
+                    description = "Spawn a glTF asset at runtime via Unity glTFast. Provide either a URL (url) or a base64-encoded .glb (data_base64).",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            url = new { type = "string", description = "URL or file:// path to a .gltf/.glb" },
+                            data_base64 = new { type = "string", description = "Base64 encoded binary glTF (.glb)" },
+                            source_uri = new { type = "string", description = "Original URI for resolving relative references when using data_base64 (optional)" },
+                            id = new { type = "string", description = "Optional UUID to assign to the spawned root" },
+                            name = new { type = "string", description = "Optional name for the spawned root object" },
+                            position = new { type = "array", items = new { type = "number" }, minItems = 3, maxItems = 3, description = "World position [x, y, z]" },
+                            rotation = new { type = "array", items = new { type = "number" }, minItems = 4, maxItems = 4, description = "Quaternion rotation [x, y, z, w]" },
+                            scale = new { type = "array", items = new { type = "number" }, minItems = 3, maxItems = 3, description = "Local scale [x, y, z]" },
+                            parent_uuid = new { type = "string", description = "Optional UUID of the parent object" }
                         }
                     }
                 }
@@ -361,6 +427,241 @@ namespace LiveLink
             }
 
             return command;
+        }
+
+        private async Task<MCPResponse> HandleCallToolAsync(MCPRequest request)
+        {
+            string toolName = request.Params?["name"]?.ToString();
+            JObject arguments = request.Params?["arguments"] as JObject;
+
+            if (string.IsNullOrEmpty(toolName))
+                return CreateErrorResponse(request.Id, -32602, "Tool name is required");
+
+            if (string.Equals(toolName, "spawn_gltf", StringComparison.OrdinalIgnoreCase))
+            {
+                return await HandleSpawnGltfToolAsync(request.Id, arguments);
+            }
+
+            // Default: existing synchronous command execution
+            CommandPacket command = MapToolToCommand(toolName, arguments);
+            if (command == null)
+                return CreateErrorResponse(request.Id, -32601, $"Tool not supported: {toolName}");
+
+            var result = _manager.ExecuteCommandInternal(command);
+            if (result.Success)
+            {
+                if (result.Data != null)
+                {
+                    string dataText;
+                    if (toolName == "scene_dump")
+                    {
+                        dataText = CreateSimplifiedSceneDump(result.Data);
+                    }
+                    else
+                    {
+                        dataText = Newtonsoft.Json.JsonConvert.SerializeObject(result.Data, Newtonsoft.Json.Formatting.Indented);
+                    }
+
+                    return CreateSuccessResponse(request.Id, new
+                    {
+                        content = new[]
+                        {
+                            new { type = "text", text = $"Successfully executed {toolName}: {result.Message}" },
+                            new { type = "text", text = $"Data: {dataText}" }
+                        },
+                        isError = false
+                    });
+                }
+
+                return CreateSuccessResponse(request.Id, new
+                {
+                    content = new[]
+                    {
+                        new { type = "text", text = $"Successfully executed {toolName}: {result.Message}" }
+                    },
+                    isError = false
+                });
+            }
+
+            return CreateSuccessResponse(request.Id, new
+            {
+                content = new[]
+                {
+                    new { type = "text", text = $"Error executing {toolName}: {result.Message}" }
+                },
+                isError = true
+            });
+        }
+
+        private async Task<MCPResponse> HandleSpawnGltfToolAsync(object id, JObject args)
+        {
+            if (args == null) args = new JObject();
+
+            string url = args["url"]?.ToString();
+            string dataBase64 = args["data_base64"]?.ToString();
+            string sourceUriString = args["source_uri"]?.ToString();
+            string name = args["name"]?.ToString();
+            string parentUuid = args["parent_uuid"]?.ToString();
+            string desiredUuid = args["id"]?.ToString();
+
+            if (string.IsNullOrEmpty(url) && string.IsNullOrEmpty(dataBase64))
+            {
+                return CreateSuccessResponse(id, new
+                {
+                    content = new[] { new { type = "text", text = "Error executing spawn_gltf: Provide either 'url' or 'data_base64'." } },
+                    isError = true
+                });
+            }
+
+            // Parse transform inputs
+            Vector3 position = Vector3.zero;
+            var posArr = args["position"] as JArray;
+            if (posArr != null && posArr.Count >= 3)
+            {
+                position = new Vector3((float)posArr[0], (float)posArr[1], (float)posArr[2]);
+            }
+
+            Quaternion rotation = Quaternion.identity;
+            var rotArr = args["rotation"] as JArray;
+            if (rotArr != null && rotArr.Count >= 4)
+            {
+                rotation = new Quaternion((float)rotArr[0], (float)rotArr[1], (float)rotArr[2], (float)rotArr[3]);
+            }
+
+            Vector3 scale = Vector3.one;
+            var scaleArr = args["scale"] as JArray;
+            if (scaleArr != null && scaleArr.Count >= 3)
+            {
+                scale = new Vector3((float)scaleArr[0], (float)scaleArr[1], (float)scaleArr[2]);
+            }
+
+            GameObject parent = null;
+            if (!string.IsNullOrEmpty(parentUuid))
+            {
+                parent = _manager.Scanner.GetGameObjectByUUID(parentUuid);
+                if (parent == null)
+                {
+                    return CreateSuccessResponse(id, new
+                    {
+                        content = new[] { new { type = "text", text = $"Error executing spawn_gltf: Parent not found: {parentUuid}" } },
+                        isError = true
+                    });
+                }
+            }
+
+            var root = new GameObject(string.IsNullOrEmpty(name) ? "glTF" : name);
+            try
+            {
+                if (parent != null)
+                {
+                    root.transform.SetParent(parent.transform, true);
+                }
+
+                root.transform.position = position;
+                root.transform.rotation = rotation;
+                root.transform.localScale = scale;
+
+                var gltf = new GltfImport();
+                bool loadSuccess;
+                string sourceLabel;
+
+                if (!string.IsNullOrEmpty(url))
+                {
+                    sourceLabel = url;
+                    loadSuccess = await gltf.Load(url);
+                }
+                else
+                {
+                    sourceLabel = "(memory glb)";
+                    byte[] data;
+                    try
+                    {
+                        data = Convert.FromBase64String(dataBase64);
+                    }
+                    catch (FormatException)
+                    {
+                        UnityEngine.Object.Destroy(root);
+                        return CreateSuccessResponse(id, new
+                        {
+                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: data_base64 is not valid base64." } },
+                            isError = true
+                        });
+                    }
+
+                    Uri sourceUri;
+                    if (!string.IsNullOrEmpty(sourceUriString) && Uri.TryCreate(sourceUriString, UriKind.Absolute, out var parsed))
+                    {
+                        sourceUri = parsed;
+                    }
+                    else
+                    {
+                        // Fallback absolute URI; helps resolve relative references in some cases.
+                        sourceUri = new Uri("file:///memory.glb");
+                    }
+
+                    loadSuccess = await gltf.LoadGltfBinary(data, sourceUri);
+                }
+
+                if (!loadSuccess)
+                {
+                    UnityEngine.Object.Destroy(root);
+                    return CreateSuccessResponse(id, new
+                    {
+                        content = new[] { new { type = "text", text = $"Error executing spawn_gltf: Failed to load glTF from {sourceLabel}" } },
+                        isError = true
+                    });
+                }
+
+                bool instantiateSuccess = await gltf.InstantiateMainSceneAsync(root.transform);
+                if (!instantiateSuccess)
+                {
+                    UnityEngine.Object.Destroy(root);
+                    return CreateSuccessResponse(id, new
+                    {
+                        content = new[] { new { type = "text", text = "Error executing spawn_gltf: Failed to instantiate glTF scene." } },
+                        isError = true
+                    });
+                }
+
+                string uuid = !string.IsNullOrEmpty(desiredUuid) ? desiredUuid : Guid.NewGuid().ToString("N").Substring(0, 12);
+                _manager.Scanner.RegisterWithUUID(root, uuid);
+
+                // Broadcast like other spawns (prefab field is used as a label here)
+                var notification = new ObjectSpawnedPacket
+                {
+                    UUID = uuid,
+                    Prefab = "gltf",
+                    Object = _manager.CreateSceneObjectDTO(root, uuid)
+                };
+                _manager.BroadcastInternal(PacketSerializer.Serialize(notification));
+
+                var responseData = new JObject
+                {
+                    ["uuid"] = uuid,
+                    ["name"] = root.name,
+                    ["source"] = !string.IsNullOrEmpty(url) ? url : "data_base64"
+                };
+                string dataText = Newtonsoft.Json.JsonConvert.SerializeObject(responseData, Newtonsoft.Json.Formatting.Indented);
+
+                return CreateSuccessResponse(id, new
+                {
+                    content = new[]
+                    {
+                        new { type = "text", text = "Successfully executed spawn_gltf: Object spawned" },
+                        new { type = "text", text = $"Data: {dataText}" }
+                    },
+                    isError = false
+                });
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Object.Destroy(root);
+                return CreateSuccessResponse(id, new
+                {
+                    content = new[] { new { type = "text", text = $"Error executing spawn_gltf: {ex.Message}" } },
+                    isError = true
+                });
+            }
         }
 
         private MCPResponse CreateSuccessResponse(object id, object result)
