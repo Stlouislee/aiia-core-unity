@@ -433,6 +433,9 @@ namespace LiveLink
                     };
                     return ResponsePacket.Ok("List of spawnable prefabs", command.RequestId, prefabData);
 
+                case "get_view_context":
+                    return HandleGetViewContext(command);
+
                 default:
                     return ResponsePacket.Error($"Unknown command type: {command.Type}", command.RequestId);
             }
@@ -650,6 +653,115 @@ namespace LiveLink
 
             obj.SetActive(payload.Active);
             return ResponsePacket.Ok($"Object {(payload.Active ? "activated" : "deactivated")}", command.RequestId);
+        }
+
+        private ResponsePacket HandleGetViewContext(CommandPacket command)
+        {
+            var payload = command.GetPayload<GetViewContextPayload>();
+            string cameraTag = payload?.CameraTag ?? "MainCamera";
+            bool includeVisible = payload?.IncludeVisibleObjects ?? false;
+            float raycastDist = payload?.RaycastDistance ?? 100f;
+
+            // Find camera
+            Camera cam = null;
+            if (cameraTag == "MainCamera")
+            {
+                cam = Camera.main;
+            }
+            else
+            {
+                var cameras = FindObjectsOfType<Camera>();
+                foreach (var c in cameras)
+                {
+                    if (c.tag == cameraTag || c.name == cameraTag)
+                    {
+                        cam = c;
+                        break;
+                    }
+                }
+            }
+
+            if (cam == null)
+            {
+                return ResponsePacket.Error($"Camera not found with tag/name: {cameraTag}", command.RequestId);
+            }
+
+            // Build context data
+            Transform camTransform = cam.transform;
+            Vector3 position = camTransform.position;
+            Vector3 forward = camTransform.forward;
+            Vector3 right = camTransform.right;
+            Vector3 up = camTransform.up;
+            Quaternion rotation = camTransform.rotation;
+
+            var contextData = new JObject
+            {
+                ["camera_name"] = cam.name,
+                ["camera_tag"] = cam.tag,
+                ["position"] = JArray.FromObject(new[] { position.x, position.y, position.z }),
+                ["rotation"] = JArray.FromObject(new[] { rotation.x, rotation.y, rotation.z, rotation.w }),
+                ["forward"] = JArray.FromObject(new[] { forward.x, forward.y, forward.z }),
+                ["right"] = JArray.FromObject(new[] { right.x, right.y, right.z }),
+                ["up"] = JArray.FromObject(new[] { up.x, up.y, up.z }),
+                ["field_of_view"] = cam.fieldOfView,
+                ["orthographic"] = cam.orthographic,
+                ["near_clip"] = cam.nearClipPlane,
+                ["far_clip"] = cam.farClipPlane
+            };
+
+            // Raycast from camera center
+            Ray ray = new Ray(position, forward);
+            RaycastHit hit;
+            if (Physics.Raycast(ray, out hit, raycastDist))
+            {
+                string hitUuid = _scanner.GetOrCreateUUID(hit.collider.gameObject);
+                contextData["looking_at"] = new JObject
+                {
+                    ["object_name"] = hit.collider.gameObject.name,
+                    ["object_uuid"] = hitUuid,
+                    ["hit_point"] = JArray.FromObject(new[] { hit.point.x, hit.point.y, hit.point.z }),
+                    ["hit_distance"] = hit.distance,
+                    ["hit_normal"] = JArray.FromObject(new[] { hit.normal.x, hit.normal.y, hit.normal.z })
+                };
+            }
+            else
+            {
+                contextData["looking_at"] = null;
+            }
+
+            // Optional: include visible objects in frustum
+            if (includeVisible)
+            {
+                var visibleObjects = new JArray();
+                var allObjects = _scanner.GetSceneObjects(false);
+                
+                foreach (var dto in allObjects)
+                {
+                    var obj = _scanner.GetGameObjectByUUID(dto.UUID);
+                    if (obj != null)
+                    {
+                        Renderer renderer = obj.GetComponent<Renderer>();
+                        if (renderer != null && renderer.isVisible)
+                        {
+                            Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
+                            if (GeometryUtility.TestPlanesAABB(planes, renderer.bounds))
+                            {
+                                visibleObjects.Add(new JObject
+                                {
+                                    ["uuid"] = dto.UUID,
+                                    ["name"] = dto.Name,
+                                    ["distance"] = Vector3.Distance(position, obj.transform.position)
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                contextData["visible_objects"] = visibleObjects;
+                contextData["visible_count"] = visibleObjects.Count;
+            }
+
+            return ResponsePacket.Ok("View context", command.RequestId, contextData);
         }
 
         #endregion

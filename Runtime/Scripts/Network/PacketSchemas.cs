@@ -377,6 +377,22 @@ namespace LiveLink.Network
         public bool IncludeInactive { get; set; } = false;
     }
 
+    /// <summary>
+    /// Get view context command payload.
+    /// </summary>
+    [Serializable]
+    public class GetViewContextPayload
+    {
+        [JsonProperty("camera_tag")]
+        public string CameraTag { get; set; } = "MainCamera";
+
+        [JsonProperty("include_visible_objects")]
+        public bool IncludeVisibleObjects { get; set; } = false;
+
+        [JsonProperty("raycast_distance")]
+        public float RaycastDistance { get; set; } = 100f;
+    }
+
     #endregion
 
     #region MCP Protocol (JSON-RPC 2.0)

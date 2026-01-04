@@ -157,6 +157,18 @@ namespace LiveLink
                         type = "object",
                         properties = new { }
                     }
+                },
+                new {
+                    name = "get_view_context",
+                    description = "Get the current camera/player view context including position, orientation, and forward direction. Useful for spatial commands like 'spawn in front of me'.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            camera_tag = new { type = "string", description = "Camera tag to query (default: 'MainCamera')" },
+                            include_visible_objects = new { type = "boolean", description = "Include list of objects visible in camera frustum" },
+                            raycast_distance = new { type = "number", description = "Distance to raycast from camera center (default: 100)" }
+                        }
+                    }
                 }
             };
 
@@ -338,6 +350,10 @@ namespace LiveLink
                     break;
                 case "list_spawnable_objects":
                     command.Type = "list_prefabs";
+                    command.Payload = args;
+                    break;
+                case "get_view_context":
+                    command.Type = "get_view_context";
                     command.Payload = args;
                     break;
                 default:
