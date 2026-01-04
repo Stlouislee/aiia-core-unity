@@ -149,6 +149,14 @@ namespace LiveLink
                             include_inactive = new { type = "boolean", description = "Whether to include inactive objects" }
                         }
                     }
+                },
+                new {
+                    name = "list_spawnable_objects",
+                    description = "Get a list of all prefab names that can be spawned using spawn_object.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new { }
+                    }
                 }
             };
 
@@ -326,6 +334,10 @@ namespace LiveLink
                     break;
                 case "scene_dump":
                     command.Type = "scene_dump";
+                    command.Payload = args;
+                    break;
+                case "list_spawnable_objects":
+                    command.Type = "list_prefabs";
                     command.Payload = args;
                     break;
                 default:

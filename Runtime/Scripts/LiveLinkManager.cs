@@ -419,10 +419,19 @@ namespace LiveLink
                 case "get_scene":
                 case "refresh":
                     // For internal use, we return the dump in the response data
-                    var payload = command.GetPayload<RequestSceneDumpPayload>();
-                    _scanner.IncludeInactive = payload?.IncludeInactive ?? _includeInactive;
+                    var dumpPayload = command.GetPayload<RequestSceneDumpPayload>();
+                    _scanner.IncludeInactive = dumpPayload?.IncludeInactive ?? _includeInactive;
                     var sceneDump = _scanner.ScanFullScene();
                     return ResponsePacket.Ok("Scene dump", command.RequestId, JObject.FromObject(sceneDump.Payload));
+
+                case "list_prefabs":
+                    var prefabs = GetRegisteredPrefabNames();
+                    var prefabData = new JObject
+                    {
+                        ["prefabs"] = JArray.FromObject(prefabs),
+                        ["count"] = prefabs.Count
+                    };
+                    return ResponsePacket.Ok("List of spawnable prefabs", command.RequestId, prefabData);
 
                 default:
                     return ResponsePacket.Error($"Unknown command type: {command.Type}", command.RequestId);
