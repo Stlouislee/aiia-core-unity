@@ -4,7 +4,7 @@ using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using LiveLink.Network;
 using UnityEngine;
-using GLTFast;
+// Use reflection to access GLTFast at runtime if it's available, avoid compile-time dependency
 
 namespace LiveLink
 {
@@ -561,14 +561,72 @@ namespace LiveLink
                 root.transform.rotation = rotation;
                 root.transform.localScale = scale;
 
-                var gltf = new GltfImport();
-                bool loadSuccess;
-                string sourceLabel;
+                // Use reflection to access GLTFast (so compilation succeeds when package absent)
+                Type giType = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    giType = asm.GetType("GLTFast.GltfImport");
+                    if (giType != null) break;
+                }
+
+                if (giType == null)
+                {
+                    UnityEngine.Object.Destroy(root);
+                    return CreateSuccessResponse(id, new
+                    {
+                        content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast package not found in project." } },
+                        isError = true
+                    });
+                }
+
+                object gltf = null;
+                try
+                {
+                    gltf = Activator.CreateInstance(giType);
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Object.Destroy(root);
+                    return CreateSuccessResponse(id, new
+                    {
+                        content = new[] { new { type = "text", text = $"Error executing spawn_gltf: Failed to create GltfImport instance: {ex.Message}" } },
+                        isError = true
+                    });
+                }
+
+                bool loadSuccess = false;
+                string sourceLabel = "";
 
                 if (!string.IsNullOrEmpty(url))
                 {
                     sourceLabel = url;
-                    loadSuccess = await gltf.Load(url);
+                    var loadMethod = giType.GetMethod("Load", BindingFlags.Public | BindingFlags.Instance);
+                    if (loadMethod == null)
+                    {
+                        UnityEngine.Object.Destroy(root);
+                        return CreateSuccessResponse(id, new
+                        {
+                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast Load method not found." } },
+                            isError = true
+                        });
+                    }
+
+                    var taskObj = loadMethod.Invoke(gltf, new object[] { url });
+                    if (taskObj is Task t)
+                    {
+                        await t;
+                        var resultProp = taskObj.GetType().GetProperty("Result");
+                        loadSuccess = resultProp != null ? (bool)resultProp.GetValue(taskObj) : true;
+                    }
+                    else
+                    {
+                        UnityEngine.Object.Destroy(root);
+                        return CreateSuccessResponse(id, new
+                        {
+                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast Load did not return a Task." } },
+                            isError = true
+                        });
+                    }
                 }
                 else
                 {
@@ -595,11 +653,36 @@ namespace LiveLink
                     }
                     else
                     {
-                        // Fallback absolute URI; helps resolve relative references in some cases.
                         sourceUri = new Uri("file:///memory.glb");
                     }
 
-                    loadSuccess = await gltf.LoadGltfBinary(data, sourceUri);
+                    var loadBinaryMethod = giType.GetMethod("LoadGltfBinary", BindingFlags.Public | BindingFlags.Instance);
+                    if (loadBinaryMethod == null)
+                    {
+                        UnityEngine.Object.Destroy(root);
+                        return CreateSuccessResponse(id, new
+                        {
+                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast LoadGltfBinary method not found." } },
+                            isError = true
+                        });
+                    }
+
+                    var taskObj = loadBinaryMethod.Invoke(gltf, new object[] { data, sourceUri });
+                    if (taskObj is Task t)
+                    {
+                        await t;
+                        var resultProp = taskObj.GetType().GetProperty("Result");
+                        loadSuccess = resultProp != null ? (bool)resultProp.GetValue(taskObj) : true;
+                    }
+                    else
+                    {
+                        UnityEngine.Object.Destroy(root);
+                        return CreateSuccessResponse(id, new
+                        {
+                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast LoadGltfBinary did not return a Task." } },
+                            isError = true
+                        });
+                    }
                 }
 
                 if (!loadSuccess)
@@ -612,13 +695,39 @@ namespace LiveLink
                     });
                 }
 
-                bool instantiateSuccess = await gltf.InstantiateMainSceneAsync(root.transform);
-                if (!instantiateSuccess)
+                var instantiateMethod = giType.GetMethod("InstantiateMainSceneAsync", BindingFlags.Public | BindingFlags.Instance);
+                if (instantiateMethod == null)
                 {
                     UnityEngine.Object.Destroy(root);
                     return CreateSuccessResponse(id, new
                     {
-                        content = new[] { new { type = "text", text = "Error executing spawn_gltf: Failed to instantiate glTF scene." } },
+                        content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast InstantiateMainSceneAsync not found." } },
+                        isError = true
+                    });
+                }
+
+                var instTaskObj = instantiateMethod.Invoke(gltf, new object[] { root.transform });
+                if (instTaskObj is Task it)
+                {
+                    await it;
+                    var resultProp = instTaskObj.GetType().GetProperty("Result");
+                    bool instantiateSuccess = resultProp != null ? (bool)resultProp.GetValue(instTaskObj) : true;
+                    if (!instantiateSuccess)
+                    {
+                        UnityEngine.Object.Destroy(root);
+                        return CreateSuccessResponse(id, new
+                        {
+                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: Failed to instantiate glTF scene." } },
+                            isError = true
+                        });
+                    }
+                }
+                else
+                {
+                    UnityEngine.Object.Destroy(root);
+                    return CreateSuccessResponse(id, new
+                    {
+                        content = new[] { new { type = "text", text = "Error executing spawn_gltf: InstantiateMainSceneAsync did not return a Task." } },
                         isError = true
                     });
                 }
