@@ -4,7 +4,9 @@ using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using LiveLink.Network;
 using UnityEngine;
-// Use reflection to access GLTFast at runtime if it's available, avoid compile-time dependency
+#if LIVELINK_GLTFAST
+using GLTFast;
+#endif
 
 namespace LiveLink
 {
@@ -493,6 +495,7 @@ namespace LiveLink
             });
         }
 
+    #if LIVELINK_GLTFAST
         private async Task<MCPResponse> HandleSpawnGltfToolAsync(object id, JObject args)
         {
             if (args == null) args = new JObject();
@@ -561,72 +564,14 @@ namespace LiveLink
                 root.transform.rotation = rotation;
                 root.transform.localScale = scale;
 
-                // Use reflection to access GLTFast (so compilation succeeds when package absent)
-                Type giType = null;
-                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    giType = asm.GetType("GLTFast.GltfImport");
-                    if (giType != null) break;
-                }
-
-                if (giType == null)
-                {
-                    UnityEngine.Object.Destroy(root);
-                    return CreateSuccessResponse(id, new
-                    {
-                        content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast package not found in project." } },
-                        isError = true
-                    });
-                }
-
-                object gltf = null;
-                try
-                {
-                    gltf = Activator.CreateInstance(giType);
-                }
-                catch (Exception ex)
-                {
-                    UnityEngine.Object.Destroy(root);
-                    return CreateSuccessResponse(id, new
-                    {
-                        content = new[] { new { type = "text", text = $"Error executing spawn_gltf: Failed to create GltfImport instance: {ex.Message}" } },
-                        isError = true
-                    });
-                }
-
-                bool loadSuccess = false;
-                string sourceLabel = "";
+                var gltf = new GltfImport();
+                bool loadSuccess;
+                string sourceLabel;
 
                 if (!string.IsNullOrEmpty(url))
                 {
                     sourceLabel = url;
-                    var loadMethod = giType.GetMethod("Load", BindingFlags.Public | BindingFlags.Instance);
-                    if (loadMethod == null)
-                    {
-                        UnityEngine.Object.Destroy(root);
-                        return CreateSuccessResponse(id, new
-                        {
-                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast Load method not found." } },
-                            isError = true
-                        });
-                    }
-
-                    var taskObj = loadMethod.Invoke(gltf, new object[] { url });
-                    if (taskObj is Task t)
-                    {
-                        await t;
-                        var resultProp = taskObj.GetType().GetProperty("Result");
-                        loadSuccess = resultProp != null ? (bool)resultProp.GetValue(taskObj) : true;
-                    }
-                    else
-                    {
-                        UnityEngine.Object.Destroy(root);
-                        return CreateSuccessResponse(id, new
-                        {
-                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast Load did not return a Task." } },
-                            isError = true
-                        });
-                    }
+                    loadSuccess = await gltf.Load(url);
                 }
                 else
                 {
@@ -653,36 +598,11 @@ namespace LiveLink
                     }
                     else
                     {
+                        // Fallback absolute URI; helps resolve relative references in some cases.
                         sourceUri = new Uri("file:///memory.glb");
                     }
 
-                    var loadBinaryMethod = giType.GetMethod("LoadGltfBinary", BindingFlags.Public | BindingFlags.Instance);
-                    if (loadBinaryMethod == null)
-                    {
-                        UnityEngine.Object.Destroy(root);
-                        return CreateSuccessResponse(id, new
-                        {
-                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast LoadGltfBinary method not found." } },
-                            isError = true
-                        });
-                    }
-
-                    var taskObj = loadBinaryMethod.Invoke(gltf, new object[] { data, sourceUri });
-                    if (taskObj is Task t)
-                    {
-                        await t;
-                        var resultProp = taskObj.GetType().GetProperty("Result");
-                        loadSuccess = resultProp != null ? (bool)resultProp.GetValue(taskObj) : true;
-                    }
-                    else
-                    {
-                        UnityEngine.Object.Destroy(root);
-                        return CreateSuccessResponse(id, new
-                        {
-                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast LoadGltfBinary did not return a Task." } },
-                            isError = true
-                        });
-                    }
+                    loadSuccess = await gltf.LoadGltfBinary(data, sourceUri);
                 }
 
                 if (!loadSuccess)
@@ -695,39 +615,13 @@ namespace LiveLink
                     });
                 }
 
-                var instantiateMethod = giType.GetMethod("InstantiateMainSceneAsync", BindingFlags.Public | BindingFlags.Instance);
-                if (instantiateMethod == null)
+                bool instantiateSuccess = await gltf.InstantiateMainSceneAsync(root.transform);
+                if (!instantiateSuccess)
                 {
                     UnityEngine.Object.Destroy(root);
                     return CreateSuccessResponse(id, new
                     {
-                        content = new[] { new { type = "text", text = "Error executing spawn_gltf: GLTFast InstantiateMainSceneAsync not found." } },
-                        isError = true
-                    });
-                }
-
-                var instTaskObj = instantiateMethod.Invoke(gltf, new object[] { root.transform });
-                if (instTaskObj is Task it)
-                {
-                    await it;
-                    var resultProp = instTaskObj.GetType().GetProperty("Result");
-                    bool instantiateSuccess = resultProp != null ? (bool)resultProp.GetValue(instTaskObj) : true;
-                    if (!instantiateSuccess)
-                    {
-                        UnityEngine.Object.Destroy(root);
-                        return CreateSuccessResponse(id, new
-                        {
-                            content = new[] { new { type = "text", text = "Error executing spawn_gltf: Failed to instantiate glTF scene." } },
-                            isError = true
-                        });
-                    }
-                }
-                else
-                {
-                    UnityEngine.Object.Destroy(root);
-                    return CreateSuccessResponse(id, new
-                    {
-                        content = new[] { new { type = "text", text = "Error executing spawn_gltf: InstantiateMainSceneAsync did not return a Task." } },
+                        content = new[] { new { type = "text", text = "Error executing spawn_gltf: Failed to instantiate glTF scene." } },
                         isError = true
                     });
                 }
@@ -772,6 +666,19 @@ namespace LiveLink
                 });
             }
         }
+#else
+        private Task<MCPResponse> HandleSpawnGltfToolAsync(object id, JObject args)
+        {
+            return Task.FromResult(CreateSuccessResponse(id, new
+            {
+                content = new[]
+                {
+                    new { type = "text", text = "Error executing spawn_gltf: Unity glTFast package not found. Install 'com.unity.cloud.gltfast' and ensure this assembly can reference it." }
+                },
+                isError = true
+            }));
+        }
+#endif
 
         private MCPResponse CreateSuccessResponse(object id, object result)
         {

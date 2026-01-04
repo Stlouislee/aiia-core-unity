@@ -2,7 +2,7 @@
     "name": "LiveLink",
     "rootNamespace": "LiveLink",
     "references": [
-        "GLTFast"
+        "glTFast"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -11,6 +11,12 @@
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.cloud.gltfast",
+            "expression": "0.0.0",
+            "define": "LIVELINK_GLTFAST"
+        }
+    ],
     "noEngineReferences": false
 }
