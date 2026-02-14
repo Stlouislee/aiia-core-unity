@@ -112,7 +112,8 @@ All JSON goes through **Newtonsoft.Json** (`JsonConvert`, `JObject`, `JArray`). 
 2. Add a case in the switch inside `HandleCallToolAsync()`.
 3. If the tool needs Unity APIs, use `MainThreadDispatcher.EnqueueAsync()`.
 4. Return results via `MCPResponse.CreateResult()` or errors via `MCPResponse.CreateError()`.
-5. Update `README.md` with the new tool's documentation.
+5. Update the Python test client (see [Updating the Python Test Client](#updating-the-python-test-client) below).
+6. Update `README.md` with the new tool's documentation.
 
 ## When Adding New MCP Resources
 
@@ -122,10 +123,68 @@ All JSON goes through **Newtonsoft.Json** (`JsonConvert`, `JObject`, `JArray`). 
 4. DTOs for new resources go in `ResourceDTOs.cs` under the `LiveLink.Network` namespace.
 5. If the resource needs a new URI helper, add it to `MCPResourceMapper.cs`.
 6. The URI scheme is `unity://` — e.g., `unity://scene/active`, `unity://go/{instanceId}`.
-7. Update `README.md` with the new resource's documentation.
+7. Update the Python test client (see [Updating the Python Test Client](#updating-the-python-test-client) below).
+8. Update `README.md` with the new resource's documentation.
 
 ## When Adding New MCP Prompts
 
 1. Add the prompt metadata to `HandleListPrompts()`.
 2. Add a case in `HandleGetPrompt()` that builds a `messages` array.
 3. Prompt builder methods follow the pattern `BuildXxxPrompt(JObject arguments)`.
+4. Update the Python test client (see [Updating the Python Test Client](#updating-the-python-test-client) below).
+
+## Updating the Python Test Client
+
+The unified test client lives at `Samples~/PythonClient/livelink_mcp_client.py`. It is the single source of truth for manual testing and must stay in sync with the server's capabilities. When adding or changing any MCP Tool, Resource, or Prompt on the server side, update the client as follows:
+
+### File structure
+
+```
+Samples~/PythonClient/
+  livelink_mcp_client.py   # Unified client class + CLI (primary file)
+  example_usage.py          # End-to-end usage examples
+  requirements.txt          # Python dependencies (websockets, aiohttp)
+  README.md                 # User-facing documentation
+```
+
+### For a new Tool
+
+1. Add a **convenience method** in the `# Core Tools` section of `LiveLinkMCPClient`. Match the tool name and every parameter from the server's `HandleListTools()` definition:
+   ```python
+   async def my_new_tool(self, required_arg: str, optional_arg: int = None) -> dict:
+       """Docstring matching the server description."""
+       args = {"required_arg": required_arg}
+       if optional_arg is not None: args["optional_arg"] = optional_arg
+       return await self.call_tool("my_new_tool", args)
+   ```
+2. Add a test case in `run_tests()` that calls the new method and validates the response shape.
+3. Optionally add an interactive command in `run_demo()`.
+
+### For a new Resource
+
+1. Add a **convenience method** in the `# Scene Resources` or `# GameObject Resources` section. Build the full `unity://` URI including any query parameters:
+   ```python
+   async def get_my_resource(self, param: str = "default") -> dict:
+       """Docstring matching the server description."""
+       return await self.read_resource(f"unity://my/resource?param={param}")
+   ```
+2. Add a test case in `run_tests()`.
+
+### For a new Prompt
+
+1. Add a **convenience method** in the `# Prompts` section:
+   ```python
+   async def run_my_prompt(self, intent: str, flag: bool = False) -> dict:
+       """Docstring matching the server description."""
+       args = {"intent": intent}
+       if flag: args["flag"] = flag
+       return await self.get_prompt("my_prompt", args)
+   ```
+2. Add a test case in `run_tests()`.
+
+### General rules
+
+- Parameter names in the Python methods **must exactly match** the JSON keys the server expects (snake_case).
+- Tools use `uuid` (string) for object identity; Resources use `instance_id` (int / Unity `InstanceID`).
+- Keep `README.md` and `example_usage.py` up to date with any new methods.
+- Run `python3 -m py_compile Samples~/PythonClient/livelink_mcp_client.py` to verify syntax after edits.

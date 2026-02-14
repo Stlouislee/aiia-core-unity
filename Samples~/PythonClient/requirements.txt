@@ -1,0 +1,3 @@
+# Unity LiveLink Python Client Dependencies
+websockets>=10.0
+aiohttp>=3.8.0

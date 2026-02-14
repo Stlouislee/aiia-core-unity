@@ -138,8 +138,14 @@ namespace LiveLink
                     }
                     break;
                 }
+                catch (ObjectDisposedException)
+                {
+                    // Listener was disposed during shutdown — expected, exit silently
+                    break;
+                }
                 catch (Exception ex)
                 {
+                    if (!_isRunning) break; // Shutting down, suppress errors
                     Debug.LogError($"[LiveLink-MCP] Error accepting client: {ex.Message}");
                 }
             }
