@@ -7,27 +7,69 @@ namespace LiveLink
 {
     /// <summary>
     /// Handles mapping between Unity GameObjects and MCP (Model Context Protocol) resources.
+    /// Supports both legacy mcp://unity URIs and new unity:// URIs.
     /// </summary>
     public static class MCPResourceMapper
     {
-        private const string URI_SCHEME = "mcp://unity";
+        private const string LEGACY_URI_SCHEME = "mcp://unity";
+        private const string URI_SCHEME = "unity://";
         private const string SCENE_PATH = "scenes";
         private const string OBJECT_PATH = "objects";
 
         /// <summary>
-        /// Generates an MCP resource URI for a given GameObject.
+        /// Generates a unity:// resource URI for a GameObject by instance ID.
         /// </summary>
-        public static string GetResourceURI(string sceneName, string uuid)
+        public static string GetGameObjectURI(int instanceId)
         {
-            return $"{URI_SCHEME}/{SCENE_PATH}/{sceneName}/{OBJECT_PATH}/{uuid}";
+            return $"unity://go/{instanceId}";
         }
 
         /// <summary>
-        /// Parses an MCP resource URI to extract the UUID.
+        /// Generates a unity:// resource URI for a GameObject's component list.
+        /// </summary>
+        public static string GetComponentsURI(int instanceId)
+        {
+            return $"unity://go/{instanceId}/components";
+        }
+
+        /// <summary>
+        /// Generates a unity:// resource URI for a specific component on a GameObject.
+        /// </summary>
+        public static string GetComponentURI(int instanceId, string componentType)
+        {
+            return $"unity://component/{instanceId}/{componentType}";
+        }
+
+        /// <summary>
+        /// Checks if a URI uses the new unity:// scheme.
+        /// </summary>
+        public static bool IsUnityScheme(string uri)
+        {
+            return !string.IsNullOrEmpty(uri) && uri.StartsWith(URI_SCHEME);
+        }
+
+        /// <summary>
+        /// Checks if a URI uses the legacy mcp://unity scheme.
+        /// </summary>
+        public static bool IsLegacyScheme(string uri)
+        {
+            return !string.IsNullOrEmpty(uri) && uri.StartsWith(LEGACY_URI_SCHEME);
+        }
+
+        /// <summary>
+        /// Generates a legacy MCP resource URI for a given GameObject (kept for backward compatibility).
+        /// </summary>
+        public static string GetResourceURI(string sceneName, string uuid)
+        {
+            return $"{LEGACY_URI_SCHEME}/{SCENE_PATH}/{sceneName}/{OBJECT_PATH}/{uuid}";
+        }
+
+        /// <summary>
+        /// Parses a legacy MCP resource URI to extract the UUID.
         /// </summary>
         public static string GetUUIDFromURI(string uri)
         {
-            if (string.IsNullOrEmpty(uri) || !uri.StartsWith(URI_SCHEME))
+            if (string.IsNullOrEmpty(uri) || !uri.StartsWith(LEGACY_URI_SCHEME))
                 return null;
 
             string[] parts = uri.Split('/');
@@ -40,7 +82,7 @@ namespace LiveLink
         }
 
         /// <summary>
-        /// Converts a SceneObjectDTO to an MCP resource representation.
+        /// Converts a SceneObjectDTO to an MCP resource representation (legacy format).
         /// </summary>
         public static Dictionary<string, object> ToMCPResource(SceneObjectDTO dto, string sceneName)
         {

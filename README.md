@@ -59,52 +59,196 @@ The server will start automatically (if Auto Start is enabled) and begin accepti
 
 ## Communication Protocol
 
+Unity LiveLink provides two transport mechanisms for different use cases:
+
+### Transport Comparison
+
+| Feature | **WebSocket** (Port 8080) | **HTTP+SSE** (Port 8081) |
+|---------|--------------------------|--------------------------|
+| **Protocol** | Custom JSON | MCP (Model Context Protocol) |
+| **Session Management** | Implicit (connection-based) | Explicit (sessionId required) |
+| **Authentication** | None | Session-based validation |
+| **Bidirectional** | Yes (full duplex) | Request/Response + SSE events |
+| **Auto-reconnect** | Client handles | Client must re-establish session |
+| **Use Case** | Simple scripting, real-time sync | LLM agents, MCP-compatible tools |
+| **Initialization** | Automatic scene dump on connect | Explicit `initialize` handshake |
+
+**Choose WebSocket when:**
+- Building simple automation scripts
+- Need low-latency bidirectional communication
+- Don't require MCP standard compliance
+
+**Choose HTTP+SSE when:**
+- Integrating with MCP-compatible LLM clients (Claude Desktop, etc.)
+- Need explicit session lifecycle control
+- Require RESTful request/response pattern
+
+---
+
+### WebSocket Transport (Port 8080)
+
 All communication uses JSON over WebSocket. Connect to `ws://localhost:8080/` (or your configured port).
 
-### MCP (Model Context Protocol)
+### MCP (Model Context Protocol) - HTTP+SSE Transport (Port 8081)
 
-The same WebSocket now accepts JSON-RPC 2.0 methods compatible with MCP-capable LLM clients.
+Unity LiveLink implements the official MCP HTTP+SSE transport specification with full session management.
 
-- `resources/list` → returns MCP resources for the active scene (`mcp://unity/scenes/{scene}/objects/{uuid}`)
-- `resources/read` → returns content for a resource URI (object snapshot as JSON)
-- `tools/list` → returns available tools
-- `tools/call` → invokes a tool (`spawn_object`, `transform_object`, `delete_object`, `set_object_parent`, `set_object_active`, `rename_object`)
+#### Session Workflow
 
-Example MCP request/response:
+1. **Connect to SSE endpoint** (`GET /sse`)
+   - Server creates a session and sends an `endpoint` event with `sessionId`
+   - Keep the SSE connection alive to maintain the session
+   
+2. **Send POST requests** to the endpoint URL (`POST /mcp?sessionId={sessionId}`)
+   - Include the `sessionId` query parameter in all requests
+   - First request must be `initialize` to authenticate the session
+   - Session expires after 5 minutes of inactivity
+   
+3. **Session Validation**
+   - `initialize`: Creates session state, no prior session required
+   - Other methods: Require valid, initialized session
+   - Error codes: `-32001` (session required), `-32002` (not initialized)
 
+#### Available Methods
+
+- `initialize` → Handshake with server capabilities
+- `resources/list` → Returns MCP resource templates for reading Unity scene data
+- `resources/read` → Returns content for a resource URI (see Resource URIs below)
+- `tools/list` → Returns available tools
+- `tools/call` → Invokes a tool (`spawn_object`, `transform_object`, `delete_object`, etc.)
+- `prompts/list` → Returns reusable MCP workflow prompts exposed by the server
+- `prompts/get` → Returns a rendered prompt template with optional arguments
+
+### MCP Resource URIs
+
+The server exposes Unity scene data through the `unity://` URI scheme:
+
+| URI | Description |
+|-----|-------------|
+| `unity://scene/active` | Basic scene info (name, path, root count, render pipeline, time, quality, platform, Unity version) |
+| `unity://scene/hierarchy?root=/&depth=2` | Hierarchy tree with configurable root path and depth |
+| `unity://go/{instanceId}` | GameObject metadata (name, tag, layer, active state, parent, children, component count, full transform) |
+| `unity://go/{instanceId}/components` | Component list with types, instance IDs, and enabled states |
+| `unity://component/{instanceId}/{componentType}` | Component field snapshot (all public fields and properties) |
+| `unity://selection` | Currently selected objects in the Unity Editor |
+| `unity://events/recent?count=50` | Recent scene events (create, delete, transform change, parent change, etc.) |
+
+#### Resource Examples
+
+**Read active scene info:**
 ```json
-{"jsonrpc":"2.0","id":1,"method":"resources/list"}
+{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"unity://scene/active"}}
 ```
 
+Response:
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 1,
+  "id": 2,
   "result": {
-    "resources": [
+    "contents": [{
+      "uri": "unity://scene/active",
+      "mimeType": "application/json",
+      "text": "{\"scene_name\":\"SampleScene\",\"root_count\":5,\"object_count\":42,\"render_pipeline\":\"URP\",\"time_scale\":1.0,\"unity_version\":\"2022.3.10f1\"}"
+    }]
+  }
+}
+```
+
+**Read scene hierarchy (depth 3):**
+```json
+{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"unity://scene/hierarchy?depth=3"}}
+```
+
+**Read a specific GameObject:**
+```json
+{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"unity://go/12345"}}
+```
+
+**Read components on a GameObject:**
+```json
+{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"unity://go/12345/components"}}
+```
+
+**Read a specific component's fields:**
+```json
+{"jsonrpc":"2.0","id":6,"method":"resources/read","params":{"uri":"unity://component/12345/MeshRenderer"}}
+```
+
+**Read current editor selection:**
+```json
+{"jsonrpc":"2.0","id":7,"method":"resources/read","params":{"uri":"unity://selection"}}
+```
+
+**Read recent events:**
+```json
+{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{"uri":"unity://events/recent?count=20"}}
+```
+
+#### Example Session Flow
+
+```json
+**Step 1: Connect to SSE**
+```
+GET http://localhost:8081/sse
+```
+Server responds with:
+```
+event: endpoint
+data: /mcp?sessionId=a1b2c3d4...
+```
+
+**Step 2: Initialize session**
+```json
+POST http://localhost:8081/mcp?sessionId=a1b2c3d4...
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": {
+      "name": "My MCP Client",
+      "version": "1.0.0"
+    }
+  }
+}
+```
+
+**Step 3: Use MCP methods**
+```json
+POST http://localhost:8081/mcp?sessionId=a1b2c3d4...
+
+{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"unity://scene/active"}}
+```
+
+Response:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "contents": [
       {
-        "uri": "mcp://unity/scenes/SampleScene",
-        "name": "SampleScene",
-        "description": "Unity scene root",
-        "mimeType": "application/json"
-      },
-      {
-        "uri": "mcp://unity/scenes/SampleScene/objects/abc123",
-        "name": "Player",
-        "description": "Unity GameObject (Player)",
-        "mimeType": "application/json"
+        "uri": "unity://scene/active",
+        "mimeType": "application/json",
+        "text": "{\"scene_name\":\"SampleScene\",\"root_count\":3,\"object_count\":15,\"render_pipeline\":\"Built-in\",\"time_scale\":1.0}"
       }
     ]
   }
 }
 ```
 
-`tools/call` example (spawn):
+**Example: Call a tool**
 
 ```json
+POST http://localhost:8081/mcp?sessionId=a1b2c3d4...
+
 {
   "jsonrpc": "2.0",
-  "id": 2,
+  "id": 3,
   "method": "tools/call",
   "params": {
     "name": "spawn_object",
@@ -117,7 +261,40 @@ Example MCP request/response:
 }
 ```
 
+**Example: Get a prompt**
+
+```json
+POST http://localhost:8081/mcp?sessionId=a1b2c3d4...
+
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "prompts/get",
+  "params": {
+    "name": "spawn_from_intent",
+    "arguments": {
+      "intent": "Create a small obstacle course in front of the player",
+      "count": 5,
+      "placement_strategy": "front_of_camera"
+    }
+  }
+}
+```
+
+**Session Errors**
+
+- **-32001**: Session required - Connect to `/sse` first to obtain a `sessionId`
+- **-32002**: Session not initialized - Send `initialize` method before other operations
+- Session expires after 5 minutes of inactivity
+
 See `mcp-config.example.json` for a ready-to-copy client config.
+
+### Available MCP Prompts
+
+- `scene_analysis` - Analyze hierarchy hotspots and propose concrete MCP tool actions.
+- `spawn_from_intent` - Turn natural-language level design intent into spawn/transform operations.
+- `object_repair` - Diagnose and repair transform/parenting issues for a target UUID.
+- `scene_cleanup` - Produce (and optionally execute) a safe cleanup plan for redundant objects.
 
 ### Available MCP Tools
 

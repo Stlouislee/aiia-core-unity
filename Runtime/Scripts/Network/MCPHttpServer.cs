@@ -1,16 +1,50 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using LiveLink.Network;
 
 namespace LiveLink
 {
+    /// <summary>
+    /// Represents an active MCP session tied to an SSE connection.
+    /// </summary>
+    internal class MCPSession
+    {
+        public string SessionId { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime LastActivityAt { get; set; }
+        public bool IsInitialized { get; set; }
+        public HttpListenerResponse SseConnection { get; set; }
+        public JObject ClientInfo { get; set; }
+
+        public MCPSession(string sessionId, HttpListenerResponse sseConnection)
+        {
+            SessionId = sessionId;
+            CreatedAt = DateTime.UtcNow;
+            LastActivityAt = DateTime.UtcNow;
+            IsInitialized = false;
+            SseConnection = sseConnection;
+        }
+
+        public bool IsExpired(TimeSpan timeout)
+        {
+            return DateTime.UtcNow - LastActivityAt > timeout;
+        }
+
+        public void UpdateActivity()
+        {
+            LastActivityAt = DateTime.UtcNow;
+        }
+    }
+
     /// <summary>
     /// HTTP server for MCP (Model Context Protocol) using HTTP + SSE transport.
     /// Implements the official MCP specification for HTTP-based communication.
@@ -22,12 +56,14 @@ namespace LiveLink
         private readonly MCPToolHandler _mcpHandler;
         private readonly int _port;
         private bool _isRunning;
-        private readonly List<HttpListenerResponse> _sseClients = new List<HttpListenerResponse>();
-        private readonly object _sseClientsLock = new object();
+        private readonly Dictionary<string, MCPSession> _sessions = new Dictionary<string, MCPSession>();
+        private readonly object _sessionsLock = new object();
+        private readonly TimeSpan _sessionTimeout = TimeSpan.FromMinutes(5);
+        private readonly TimeSpan _cleanupInterval = TimeSpan.FromSeconds(30);
 
         public bool IsRunning => _isRunning;
         public int Port => _port;
-        public int ClientCount { get { lock(_sseClientsLock) { return _sseClients.Count; } } }
+        public int ClientCount { get { lock(_sessionsLock) { return _sessions.Count; } } }
 
         public MCPHttpServer(MCPToolHandler mcpHandler, int port = 8081)
         {
@@ -49,6 +85,7 @@ namespace LiveLink
 
                 _cancellationTokenSource = new CancellationTokenSource();
                 Task.Run(() => AcceptClientsAsync(_cancellationTokenSource.Token));
+                Task.Run(() => SessionCleanupLoopAsync(_cancellationTokenSource.Token));
 
                 Debug.Log($"[LiveLink-MCP] HTTP server started on port {_port}");
             }
@@ -66,9 +103,9 @@ namespace LiveLink
             _isRunning = false;
             _cancellationTokenSource?.Cancel();
             
-            lock (_sseClientsLock)
+            lock (_sessionsLock)
             {
-                _sseClients.Clear();
+                _sessions.Clear();
             }
 
             try
@@ -198,6 +235,21 @@ namespace LiveLink
                 // Add MCP protocol version header
                 response.AddHeader("MCP-Protocol-Version", "2024-11-05");
 
+                // Extract and validate sessionId from query string
+                string sessionId = request.QueryString["sessionId"];
+                MCPSession session = null;
+
+                if (!string.IsNullOrEmpty(sessionId))
+                {
+                    lock (_sessionsLock)
+                    {
+                        if (_sessions.TryGetValue(sessionId, out session))
+                        {
+                            session.UpdateActivity();
+                        }
+                    }
+                }
+
                 // Read request body
                 string requestBody;
                 using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
@@ -205,7 +257,7 @@ namespace LiveLink
                     requestBody = await reader.ReadToEndAsync();
                 }
 
-                Debug.Log($"[LiveLink-MCP] Received request: {requestBody}");
+                Debug.Log($"[LiveLink-MCP] Received request (Session: {sessionId ?? "none"}): {requestBody}");
 
                 // Parse MCP request
                 var mcpRequest = PacketSerializer.ParseMCPRequest(requestBody);
@@ -223,6 +275,41 @@ namespace LiveLink
                     return;
                 }
 
+                // Session validation based on method
+                string method = mcpRequest.Method;
+                bool requiresSession = method != "initialize";
+                bool requiresInitialized = method != "initialize" && method != "notifications/initialized";
+
+                if (requiresSession && session == null)
+                {
+                    response.StatusCode = 401;
+                    byte[] errorData = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
+                    {
+                        jsonrpc = "2.0",
+                        id = mcpRequest.Id,
+                        error = new { code = -32001, message = "Session required. Connect to /sse first to obtain a sessionId." }
+                    }));
+                    await response.OutputStream.WriteAsync(errorData, 0, errorData.Length);
+                    response.Close();
+                    Debug.LogWarning($"[LiveLink-MCP] Rejected request without valid session: {method}");
+                    return;
+                }
+
+                if (requiresInitialized && session != null && !session.IsInitialized)
+                {
+                    response.StatusCode = 403;
+                    byte[] errorData = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
+                    {
+                        jsonrpc = "2.0",
+                        id = mcpRequest.Id,
+                        error = new { code = -32002, message = "Session not initialized. Send 'initialize' method first." }
+                    }));
+                    await response.OutputStream.WriteAsync(errorData, 0, errorData.Length);
+                    response.Close();
+                    Debug.LogWarning($"[LiveLink-MCP] Rejected request on uninitialized session: {method}");
+                    return;
+                }
+
                 // Process request on main thread
                 MCPResponse mcpResponse = null;
                 var tcs = new TaskCompletionSource<MCPResponse>();
@@ -232,6 +319,22 @@ namespace LiveLink
                     try
                     {
                         mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
+                        
+                        // Mark session as initialized after successful initialize method
+                        if (method == "initialize" && mcpResponse != null && mcpResponse.Error == null && session != null)
+                        {
+                            lock (_sessionsLock)
+                            {
+                                session.IsInitialized = true;
+                                // Store client info if present in params
+                                if (mcpRequest.Params != null && mcpRequest.Params["clientInfo"] != null)
+                                {
+                                    session.ClientInfo = mcpRequest.Params["clientInfo"] as JObject;
+                                }
+                            }
+                            Debug.Log($"[LiveLink-MCP] Session {sessionId} initialized");
+                        }
+                        
                         tcs.SetResult(mcpResponse);
                     }
                     catch (Exception ex)
@@ -276,6 +379,8 @@ namespace LiveLink
         private async Task HandleSSEConnectionAsync(HttpListenerResponse response)
         {
             string sessionId = Guid.NewGuid().ToString("N");
+            MCPSession session = null;
+            
             try
             {
                 // Set SSE headers
@@ -284,9 +389,11 @@ namespace LiveLink
                 response.AddHeader("Connection", "keep-alive");
                 response.StatusCode = 200;
 
-                lock (_sseClientsLock)
+                // Create and register session
+                session = new MCPSession(sessionId, response);
+                lock (_sessionsLock)
                 {
-                    _sseClients.Add(response);
+                    _sessions[sessionId] = session;
                 }
 
                 Debug.Log($"[LiveLink-MCP] SSE client connected (Session: {sessionId})");
@@ -312,15 +419,63 @@ namespace LiveLink
             }
             catch (Exception ex)
             {
-                Debug.Log($"[LiveLink-MCP] SSE client disconnected: {ex.Message}");
+                Debug.Log($"[LiveLink-MCP] SSE client disconnected (Session: {sessionId}): {ex.Message}");
             }
             finally
             {
-                lock (_sseClientsLock)
+                // Clean up session when SSE connection closes
+                if (session != null)
                 {
-                    _sseClients.Remove(response);
+                    lock (_sessionsLock)
+                    {
+                        _sessions.Remove(sessionId);
+                    }
+                    Debug.Log($"[LiveLink-MCP] Session {sessionId} removed (SSE disconnected)");
                 }
                 try { response.Close(); } catch { }
+            }
+        }
+
+        private async Task SessionCleanupLoopAsync(CancellationToken cancellationToken)
+        {
+            while (_isRunning && !cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(_cleanupInterval, cancellationToken);
+                    
+                    List<string> expiredSessions = new List<string>();
+                    lock (_sessionsLock)
+                    {
+                        foreach (var kvp in _sessions)
+                        {
+                            if (kvp.Value.IsExpired(_sessionTimeout))
+                            {
+                                expiredSessions.Add(kvp.Key);
+                            }
+                        }
+
+                        foreach (var sessionId in expiredSessions)
+                        {
+                            var session = _sessions[sessionId];
+                            _sessions.Remove(sessionId);
+                            try { session.SseConnection?.Close(); } catch { }
+                        }
+                    }
+
+                    if (expiredSessions.Count > 0)
+                    {
+                        Debug.Log($"[LiveLink-MCP] Cleaned up {expiredSessions.Count} expired session(s)");
+                    }
+                }
+                catch (TaskCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[LiveLink-MCP] Error in session cleanup loop: {ex.Message}");
+                }
             }
         }
 
@@ -341,15 +496,18 @@ namespace LiveLink
 
         public void BroadcastSSE(string eventType, string data)
         {
-            List<HttpListenerResponse> clientsCopy;
-            lock (_sseClientsLock)
+            List<MCPSession> activeSessions;
+            lock (_sessionsLock)
             {
-                clientsCopy = new List<HttpListenerResponse>(_sseClients);
+                activeSessions = _sessions.Values.ToList();
             }
 
-            foreach (var client in clientsCopy)
+            foreach (var session in activeSessions)
             {
-                _ = SendSSEEventAsync(client, eventType, data);
+                if (session.SseConnection != null)
+                {
+                    _ = SendSSEEventAsync(session.SseConnection, eventType, data);
+                }
             }
         }
 

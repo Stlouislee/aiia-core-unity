@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
-Unity LiveLink - MCP Protocol Test Client
+Unity LiveLink - MCP Protocol Test Client (WebSocket Transport)
 
-This script tests the MCP (Model Context Protocol) implementation in Unity LiveLink.
+This script tests MCP over WebSocket. Note that WebSocket connections are inherently
+stateful, so session management (sessionId) is NOT required when using ws:// transport.
+
+For the official MCP HTTP+SSE implementation with session management, see:
+- mcp_http_client_test.py
+
+WebSocket transport is simpler but less standard for MCP. Use HTTP+SSE for production.
 """
 
 import asyncio

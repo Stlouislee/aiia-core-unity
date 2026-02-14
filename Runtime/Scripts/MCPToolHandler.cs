@@ -57,6 +57,10 @@ namespace LiveLink
                         return HandleListResources(request.Id);
                     case "resources/read":
                         return HandleReadResource(request);
+                    case "prompts/list":
+                        return HandleListPrompts(request.Id);
+                    case "prompts/get":
+                        return HandleGetPrompt(request);
                     default:
                         return CreateErrorResponse(request.Id, -32601, $"Method not found: {request.Method}");
                 }
@@ -92,6 +96,10 @@ namespace LiveLink
                         return HandleListResources(request.Id);
                     case "resources/read":
                         return HandleReadResource(request);
+                    case "prompts/list":
+                        return HandleListPrompts(request.Id);
+                    case "prompts/get":
+                        return HandleGetPrompt(request);
                     default:
                         return CreateErrorResponse(request.Id, -32601, $"Method not found: {request.Method}");
                 }
@@ -307,21 +315,15 @@ namespace LiveLink
 
         private MCPResponse HandleListResources(object id)
         {
-            var resources = new List<object>();
-            var sceneObjects = _manager.Scanner.GetSceneObjects(false);
-            string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
-
-            foreach (var dto in sceneObjects)
+            var resourceProvider = _manager.ResourceProvider;
+            if (resourceProvider == null)
             {
-                resources.Add(new {
-                    uri = MCPResourceMapper.GetResourceURI(sceneName, dto.UUID),
-                    name = dto.Name,
-                    mimeType = "application/json",
-                    description = $"Unity GameObject: {dto.Name} ({dto.UUID})"
-                });
+                return CreateErrorResponse(id, -32603, "Resource provider not initialized");
             }
 
-            return CreateSuccessResponse(id, new { resources = resources });
+            var resourceTemplates = resourceProvider.GetResourceTemplates();
+
+            return CreateSuccessResponse(id, new { resources = resourceTemplates });
         }
 
         private MCPResponse HandleReadResource(MCPRequest request)
@@ -330,6 +332,38 @@ namespace LiveLink
             if (string.IsNullOrEmpty(uri))
                 return CreateErrorResponse(request.Id, -32602, "URI is required");
 
+            // Try new unity:// scheme first
+            if (MCPResourceMapper.IsUnityScheme(uri))
+            {
+                var resourceProvider = _manager.ResourceProvider;
+                if (resourceProvider == null)
+                {
+                    return CreateErrorResponse(request.Id, -32603, "Resource provider not initialized");
+                }
+
+                var result = resourceProvider.ReadResource(uri);
+                if (result == null)
+                {
+                    return CreateErrorResponse(request.Id, -32004, $"Resource not found: {uri}");
+                }
+
+                string jsonText = Newtonsoft.Json.JsonConvert.SerializeObject(result, Newtonsoft.Json.Formatting.Indented);
+
+                return CreateSuccessResponse(request.Id, new
+                {
+                    contents = new[]
+                    {
+                        new
+                        {
+                            uri = uri,
+                            mimeType = "application/json",
+                            text = jsonText
+                        }
+                    }
+                });
+            }
+
+            // Fallback: legacy mcp://unity scheme
             string uuid = MCPResourceMapper.GetUUIDFromURI(uri);
             if (string.IsNullOrEmpty(uuid))
                 return CreateErrorResponse(request.Id, -32602, "Invalid resource URI");
@@ -342,15 +376,310 @@ namespace LiveLink
             string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
             var mcpResource = MCPResourceMapper.ToMCPResource(dto, sceneName);
 
-            return CreateSuccessResponse(request.Id, new { 
-                contents = new[] { 
-                    new { 
+            return CreateSuccessResponse(request.Id, new {
+                contents = new[] {
+                    new {
                         uri = uri,
                         mimeType = "application/json",
                         text = Newtonsoft.Json.JsonConvert.SerializeObject(mcpResource)
-                    } 
-                } 
+                    }
+                }
             });
+        }
+
+        private MCPResponse HandleListPrompts(object id)
+        {
+            var prompts = new List<object>
+            {
+                new
+                {
+                    name = "scene_analysis",
+                    title = "Scene Analysis Workflow",
+                    description = "Analyze the active Unity scene, summarize hierarchy hotspots, and suggest concrete tool calls.",
+                    arguments = new[]
+                    {
+                        new { name = "analysis_goal", description = "What to optimize or inspect (performance, organization, gameplay setup, etc.)", required = false },
+                        new { name = "include_inactive", description = "Whether to include inactive objects in the analysis", required = false },
+                        new { name = "focus_query", description = "Optional object/type keyword to focus on", required = false }
+                    }
+                },
+                new
+                {
+                    name = "spawn_from_intent",
+                    title = "Intent-to-Spawn Workflow",
+                    description = "Turn a natural-language level design intent into concrete Unity object spawns and transforms.",
+                    arguments = new[]
+                    {
+                        new { name = "intent", description = "What should be created in the scene", required = true },
+                        new { name = "count", description = "Preferred number of spawned objects", required = false },
+                        new { name = "placement_strategy", description = "e.g. front_of_camera, grid, random_scatter", required = false }
+                    }
+                },
+                new
+                {
+                    name = "object_repair",
+                    title = "Object Repair Workflow",
+                    description = "Diagnose and repair transform/parenting issues for a target object.",
+                    arguments = new[]
+                    {
+                        new { name = "uuid", description = "Target object UUID", required = true },
+                        new { name = "issue_description", description = "Describe the observed issue", required = false },
+                        new { name = "preserve_world_pose", description = "Preserve world-space pose when reparenting", required = false }
+                    }
+                },
+                new
+                {
+                    name = "scene_cleanup",
+                    title = "Scene Cleanup Workflow",
+                    description = "Find redundant/noisy objects and produce a safe cleanup plan using MCP tools.",
+                    arguments = new[]
+                    {
+                        new { name = "scope", description = "all, inactive_only, or name_pattern", required = false },
+                        new { name = "name_pattern", description = "Regex-like substring filter for candidate names", required = false },
+                        new { name = "dry_run", description = "If true, only return plan and do not execute delete calls", required = false }
+                    }
+                }
+            };
+
+            return CreateSuccessResponse(id, new { prompts });
+        }
+
+        private MCPResponse HandleGetPrompt(MCPRequest request)
+        {
+            string promptName = request.Params?["name"]?.ToString();
+            JObject arguments = request.Params?["arguments"] as JObject;
+
+            if (string.IsNullOrEmpty(promptName))
+                return CreateErrorResponse(request.Id, -32602, "Prompt name is required");
+
+            if (arguments == null) arguments = new JObject();
+
+            object result;
+            switch (promptName)
+            {
+                case "scene_analysis":
+                    result = BuildSceneAnalysisPrompt(arguments);
+                    break;
+                case "spawn_from_intent":
+                    result = BuildSpawnFromIntentPrompt(arguments);
+                    break;
+                case "object_repair":
+                    result = BuildObjectRepairPrompt(arguments);
+                    break;
+                case "scene_cleanup":
+                    result = BuildSceneCleanupPrompt(arguments);
+                    break;
+                default:
+                    return CreateErrorResponse(request.Id, -32601, $"Prompt not found: {promptName}");
+            }
+
+            return CreateSuccessResponse(request.Id, result);
+        }
+
+        private object BuildSceneAnalysisPrompt(JObject arguments)
+        {
+            string analysisGoal = GetStringArgument(arguments, "analysis_goal", "Find structural, gameplay, and performance improvements.");
+            bool includeInactive = GetBoolArgument(arguments, "include_inactive", false);
+            string focusQuery = GetStringArgument(arguments, "focus_query", "");
+
+            string userText =
+                "Analyze the current Unity scene and produce an actionable engineering report.\n" +
+                $"Goal: {analysisGoal}\n" +
+                $"Include inactive objects: {includeInactive}\n" +
+                (string.IsNullOrEmpty(focusQuery) ? "" : $"Focus query: {focusQuery}\n") +
+                "Workflow:\n" +
+                "1) Call resources/read with uri 'unity://scene/active' to get scene overview.\n" +
+                "2) Call resources/read with uri 'unity://scene/hierarchy?depth=3' to get the hierarchy tree.\n" +
+                "3) For suspicious objects, call resources/read with uri 'unity://go/{instanceId}' and 'unity://go/{instanceId}/components'.\n" +
+                "4) If needed, read specific component details via 'unity://component/{instanceId}/{componentType}'.\n" +
+                "5) Check 'unity://events/recent' for recent changes that may relate to issues.\n" +
+                "6) Return: findings, ranked fixes, and exact tool calls to apply fixes.";
+
+            return new
+            {
+                description = "Analyze scene state and return prioritized fixes.",
+                messages = new[]
+                {
+                    new
+                    {
+                        role = "user",
+                        content = new[]
+                        {
+                            new { type = "text", text = userText }
+                        }
+                    }
+                }
+            };
+        }
+
+        private object BuildSpawnFromIntentPrompt(JObject arguments)
+        {
+            string intent = GetStringArgument(arguments, "intent", "Create a small playable layout near the player view.");
+            int count = GetIntArgument(arguments, "count", 3);
+            string placement = GetStringArgument(arguments, "placement_strategy", "front_of_camera");
+
+            string userText =
+                "Convert the design intent into concrete Unity object creation actions.\n" +
+                $"Intent: {intent}\n" +
+                $"Target count: {count}\n" +
+                $"Placement strategy: {placement}\n" +
+                "Workflow:\n" +
+                "1) Call tools/call(list_spawnable_objects) to learn available prefabs.\n" +
+                "2) Call tools/call(get_view_context) to anchor placement.\n" +
+                "3) Call resources/read with uri 'unity://scene/active' to understand the current scene.\n" +
+                "4) Choose matching prefabs and call tools/call(spawn_object) multiple times.\n" +
+                "5) Optionally call tools/call(transform_object) for alignment and spacing.\n" +
+                "6) Return a concise build log with created UUIDs and final layout rationale.";
+
+            return new
+            {
+                description = "Plan and execute object spawning from natural-language intent.",
+                messages = new[]
+                {
+                    new
+                    {
+                        role = "user",
+                        content = new[]
+                        {
+                            new { type = "text", text = userText }
+                        }
+                    }
+                }
+            };
+        }
+
+        private object BuildObjectRepairPrompt(JObject arguments)
+        {
+            string uuid = GetStringArgument(arguments, "uuid", "");
+            string issueDescription = GetStringArgument(arguments, "issue_description", "Object appears misplaced, rotated incorrectly, or attached to wrong parent.");
+            bool preserveWorldPose = GetBoolArgument(arguments, "preserve_world_pose", true);
+
+            if (string.IsNullOrEmpty(uuid))
+            {
+                return new
+                {
+                    description = "Repair object transform/parenting issues.",
+                    messages = new[]
+                    {
+                        new
+                        {
+                            role = "user",
+                            content = new[]
+                            {
+                                new { type = "text", text = "Missing required argument: uuid. Ask for a target UUID, then rerun prompts/get for object_repair." }
+                            }
+                        }
+                    }
+                };
+            }
+
+            string userText =
+                "Diagnose and repair a Unity object issue.\n" +
+                $"Target UUID: {uuid}\n" +
+                $"Issue description: {issueDescription}\n" +
+                $"Preserve world pose on parent changes: {preserveWorldPose}\n" +
+                "Workflow:\n" +
+                "1) Call resources/read with uri 'unity://scene/hierarchy?depth=3' to understand the tree.\n" +
+                "2) Find the target object's instanceId and call resources/read with uri 'unity://go/{instanceId}' to inspect its state.\n" +
+                "3) Call resources/read with uri 'unity://go/{instanceId}/components' to check components.\n" +
+                "4) Apply tools/call(transform_object) and, when supported by workflow, reparent via command tools.\n" +
+                "5) Re-read resource and verify issue is resolved.\n" +
+                "6) Return before/after summary and exact operations performed.";
+
+            return new
+            {
+                description = "Repair object transform/parenting issues.",
+                messages = new[]
+                {
+                    new
+                    {
+                        role = "user",
+                        content = new[]
+                        {
+                            new { type = "text", text = userText }
+                        }
+                    }
+                }
+            };
+        }
+
+        private object BuildSceneCleanupPrompt(JObject arguments)
+        {
+            string scope = GetStringArgument(arguments, "scope", "inactive_only");
+            string namePattern = GetStringArgument(arguments, "name_pattern", "");
+            bool dryRun = GetBoolArgument(arguments, "dry_run", true);
+
+            string userText =
+                "Generate and execute a safe scene cleanup workflow.\n" +
+                $"Scope: {scope}\n" +
+                (string.IsNullOrEmpty(namePattern) ? "" : $"Name pattern: {namePattern}\n") +
+                $"Dry run: {dryRun}\n" +
+                "Workflow:\n" +
+                "1) Call resources/read with uri 'unity://scene/active' for overview.\n" +
+                "2) Call resources/read with uri 'unity://scene/hierarchy?depth=10' to get the full hierarchy.\n" +
+                "3) Identify deletion candidates according to scope and pattern.\n" +
+                "4) For each candidate, call resources/read with uri 'unity://go/{instanceId}' to check children/dependencies.\n" +
+                "5) Return candidate list with risk notes (parent/child impact).\n" +
+                "6) If dry_run is false, call tools/call(delete_object) for approved candidates only.\n" +
+                "7) Return final summary: removed count, skipped count, and unresolved risks.";
+
+            return new
+            {
+                description = "Identify and optionally execute scene cleanup operations.",
+                messages = new[]
+                {
+                    new
+                    {
+                        role = "user",
+                        content = new[]
+                        {
+                            new { type = "text", text = userText }
+                        }
+                    }
+                }
+            };
+        }
+
+        private string GetStringArgument(JObject arguments, string key, string defaultValue)
+        {
+            if (arguments == null) return defaultValue;
+            return arguments[key]?.ToString() ?? defaultValue;
+        }
+
+        private bool GetBoolArgument(JObject arguments, string key, bool defaultValue)
+        {
+            if (arguments == null || arguments[key] == null) return defaultValue;
+
+            var token = arguments[key];
+            if (token.Type == JTokenType.Boolean)
+            {
+                return token.Value<bool>();
+            }
+
+            if (token.Type == JTokenType.String && bool.TryParse(token.ToString(), out bool parsed))
+            {
+                return parsed;
+            }
+
+            return defaultValue;
+        }
+
+        private int GetIntArgument(JObject arguments, string key, int defaultValue)
+        {
+            if (arguments == null || arguments[key] == null) return defaultValue;
+
+            var token = arguments[key];
+            if (token.Type == JTokenType.Integer)
+            {
+                return token.Value<int>();
+            }
+
+            if (token.Type == JTokenType.String && int.TryParse(token.ToString(), out int parsed))
+            {
+                return parsed;
+            }
+
+            return defaultValue;
         }
 
         private string CreateSimplifiedSceneDump(Newtonsoft.Json.Linq.JObject data)

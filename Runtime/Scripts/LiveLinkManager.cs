@@ -84,6 +84,16 @@ namespace LiveLink
         public int ClientCount => _server?.ClientCount ?? 0;
 
         /// <summary>
+        /// Gets the number of active MCP sessions.
+        /// </summary>
+        public int MCPClientCount => _mcpHttpServer?.ClientCount ?? 0;
+
+        /// <summary>
+        /// Gets whether the MCP HTTP server is running.
+        /// </summary>
+        public bool IsMCPServerRunning => _mcpHttpServer?.IsRunning ?? false;
+
+        /// <summary>
         /// Gets or sets the server port.
         /// </summary>
         public int Port
@@ -123,6 +133,16 @@ namespace LiveLink
         /// </summary>
         public SceneScanner Scanner => _scanner;
 
+        /// <summary>
+        /// Gets the scene event tracker.
+        /// </summary>
+        public SceneEventTracker EventTracker => _eventTracker;
+
+        /// <summary>
+        /// Gets the MCP resource provider.
+        /// </summary>
+        public MCPResourceProvider ResourceProvider => _resourceProvider;
+
         #endregion
 
         #region Private Fields
@@ -131,6 +151,8 @@ namespace LiveLink
         private MCPHttpServer _mcpHttpServer;
         private SceneScanner _scanner;
         private MCPToolHandler _mcpHandler;
+        private SceneEventTracker _eventTracker;
+        private MCPResourceProvider _resourceProvider;
         private Dictionary<string, GameObject> _prefabLookup;
         private float _syncTimer = 0f;
         private float _cleanupTimer = 0f;
@@ -145,6 +167,8 @@ namespace LiveLink
             MainThreadDispatcher.Initialize();
             InitializePrefabLookup();
             InitializeScanner();
+            InitializeEventTracker();
+            _resourceProvider = new MCPResourceProvider(this, _eventTracker);
             _mcpHandler = new MCPToolHandler(this);
         }
 
@@ -229,6 +253,15 @@ namespace LiveLink
                 IncludeInactive = _includeInactive,
                 DeltaThreshold = _deltaThreshold
             };
+        }
+
+        private void InitializeEventTracker()
+        {
+            _eventTracker = gameObject.GetComponent<SceneEventTracker>();
+            if (_eventTracker == null)
+            {
+                _eventTracker = gameObject.AddComponent<SceneEventTracker>();
+            }
         }
 
         #endregion
@@ -521,6 +554,9 @@ namespace LiveLink
 
             Debug.Log($"[LiveLink] Spawned '{prefab.name}' with UUID: {uuid}");
 
+            // Track event
+            _eventTracker?.RecordObjectCreated(spawned);
+
             // Send notification
             var notification = new ObjectSpawnedPacket
             {
@@ -578,6 +614,9 @@ namespace LiveLink
                 transform.localScale = new Vector3(payload.Scale[0], payload.Scale[1], payload.Scale[2]);
             }
 
+            // Track event
+            _eventTracker?.RecordTransformChanged(obj);
+
             return ResponsePacket.Ok("Transform updated", command.RequestId);
         }
 
@@ -597,6 +636,10 @@ namespace LiveLink
 
             string uuid = payload.UUID;
             _scanner.Unregister(obj);
+
+            // Track event before destruction
+            _eventTracker?.RecordObjectDestroyed(obj);
+
             Destroy(obj);
 
             Debug.Log($"[LiveLink] Deleted object with UUID: {uuid}");
@@ -622,7 +665,12 @@ namespace LiveLink
                 return ResponsePacket.Error($"Object not found: {payload.UUID}", command.RequestId);
             }
 
+            string oldName = obj.name;
             obj.name = payload.Name ?? "Renamed Object";
+
+            // Track event
+            _eventTracker?.RecordNameChanged(obj, oldName);
+
             return ResponsePacket.Ok("Object renamed", command.RequestId);
         }
 
@@ -651,7 +699,12 @@ namespace LiveLink
                 newParent = parentObj.transform;
             }
 
+            Transform oldParent = obj.transform.parent;
             obj.transform.SetParent(newParent, payload.WorldPositionStays);
+
+            // Track event
+            _eventTracker?.RecordParentChanged(obj, oldParent, newParent);
+
             return ResponsePacket.Ok("Parent changed", command.RequestId);
         }
 
@@ -670,6 +723,10 @@ namespace LiveLink
             }
 
             obj.SetActive(payload.Active);
+
+            // Track event
+            _eventTracker?.RecordActiveChanged(obj);
+
             return ResponsePacket.Ok($"Object {(payload.Active ? "activated" : "deactivated")}", command.RequestId);
         }
 

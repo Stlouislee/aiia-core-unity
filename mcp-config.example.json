@@ -1,0 +1,43 @@
+{
+  "mcpServers": {
+    "unity-livelink": {
+      "transport": {
+        "type": "http-sse",
+        "url": "http://localhost:8081"
+      },
+      "capabilities": {
+        "resources": {
+          "subscribe": false
+        },
+        "tools": {
+          "listChanged": true
+        },
+        "prompts": {
+          "listChanged": false
+        }
+      },
+      "metadata": {
+        "name": "Unity LiveLink MCP Server",
+        "description": "Real-time access to Unity scene objects, tools, and workflow prompts",
+        "version": "1.1.0"
+      },
+      "endpoints": {
+        "sse": "/sse",
+        "messages": "/mcp",
+        "health": "/health"
+      }
+    }
+  },
+  "clientInfo": {
+    "name": "My MCP Client",
+    "version": "1.0.0"
+  },
+  "settings": {
+    "sessionTimeout": 300,
+    "reconnect": {
+      "enabled": true,
+      "maxAttempts": 5,
+      "backoffMs": 1000
+    }
+  }
+}

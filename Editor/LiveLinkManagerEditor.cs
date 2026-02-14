@@ -210,6 +210,16 @@ namespace LiveLink.Editor
             EditorGUILayout.LabelField("HTTP + SSE");
             EditorGUILayout.EndHorizontal();
 
+            // Session count
+            if (isMCPRunning && Application.isPlaying)
+            {
+                int mcpClientCount = _manager.MCPClientCount;
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField("Sessions:", GUILayout.Width(60));
+                EditorGUILayout.LabelField(mcpClientCount.ToString(), EditorStyles.boldLabel);
+                EditorGUILayout.EndHorizontal();
+            }
+
             if (isMCPRunning)
             {
                 EditorGUILayout.Space(5);

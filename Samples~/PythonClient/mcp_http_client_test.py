@@ -17,7 +17,7 @@ except ImportError:
     sys.exit(1)
 
 async def test_mcp_http(base_url: str = "http://localhost:8081"):
-    """Test MCP server using HTTP + SSE"""
+    """Test MCP server using HTTP + SSE with proper session management"""
     
     async with aiohttp.ClientSession() as session:
         print(f"Testing MCP server at {base_url}")
@@ -29,14 +29,44 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
             print(f"Status: {resp.status}")
             print(f"Response: {json.dumps(health, indent=2)}")
         
-        # 2. Initialize (MCP requirement)
+        # 2. Connect to SSE and extract sessionId
+        print("\n--- Connecting to SSE endpoint ---")
+        session_id = None
+        mcp_endpoint = None
+        
+        async with session.get(f"{base_url}/sse") as sse_resp:
+            print(f"SSE Status: {sse_resp.status}")
+            if sse_resp.status == 200:
+                # Read the first SSE event (endpoint event)
+                async for line in sse_resp.content:
+                    decoded = line.decode('utf-8').strip()
+                    if decoded.startswith("data: "):
+                        endpoint_path = decoded[6:]  # Remove "data: " prefix
+                        print(f"Received endpoint: {endpoint_path}")
+                        
+                        # Parse sessionId from endpoint path
+                        if "sessionId=" in endpoint_path:
+                            import urllib.parse
+                            parsed = urllib.parse.urlparse(endpoint_path)
+                            params = urllib.parse.parse_qs(parsed.query)
+                            session_id = params.get('sessionId', [None])[0]
+                            mcp_endpoint = f"{base_url}{parsed.path}"
+                            print(f"Extracted sessionId: {session_id}")
+                        break
+                # Close SSE connection for this test (in production, keep it alive)
+        
+        if not session_id:
+            print("Failed to obtain sessionId from SSE")
+            return
+        
+        # 3. Initialize with sessionId (MCP requirement)
         print("\n--- Initialize (MCP Protocol Handshake) ---")
         init_request = {
             "jsonrpc": "2.0",
             "id": 0,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2025-11-25",
+                "protocolVersion": "2024-11-05",
                 "capabilities": {},
                 "clientInfo": {
                     "name": "Unity LiveLink Test Client",
@@ -44,7 +74,7 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
                 }
             }
         }
-        async with session.post(f"{base_url}/mcp", json=init_request) as resp:
+        async with session.post(f"{mcp_endpoint}?sessionId={session_id}", json=init_request) as resp:
             response = await resp.json()
             print(f"Status: {resp.status}")
             print(f"Response: {json.dumps(response, indent=2)}")
@@ -63,20 +93,20 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
             print(f"\nConnected to: {server_info.get('name', 'Unknown')} v{server_info.get('version', 'Unknown')}")
             print(f"Server capabilities: {list(capabilities.keys())}")
         
-        # 3. Send initialized notification (MCP requirement)
+        # 4. Send initialized notification (MCP requirement)
         print("\n--- Send Initialized Notification ---")
         initialized_notification = {
             "jsonrpc": "2.0",
             "method": "notifications/initialized"
         }
-        async with session.post(f"{base_url}/mcp", json=initialized_notification) as resp:
+        async with session.post(f"{mcp_endpoint}?sessionId={session_id}", json=initialized_notification) as resp:
             print(f"Status: {resp.status}")
             if resp.status == 204:
                 print("Initialized notification sent successfully")
             else:
                 print(f"Unexpected status: {resp.status}")
         
-        # 4. List Tools
+        # 5. List Tools
         print("\n--- Testing tools/list ---")
         list_tools_request = {
             "jsonrpc": "2.0",
@@ -84,12 +114,12 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
             "method": "tools/list",
             "params": {}
         }
-        async with session.post(f"{base_url}/mcp", json=list_tools_request) as resp:
+        async with session.post(f"{mcp_endpoint}?sessionId={session_id}", json=list_tools_request) as resp:
             response = await resp.json()
             print(f"Status: {resp.status}")
             print(f"Response: {json.dumps(response, indent=2)}")
         
-        # 5. List Resources
+        # 6. List Resources
         print("\n--- Testing resources/list ---")
         list_resources_request = {
             "jsonrpc": "2.0",
@@ -97,12 +127,12 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
             "method": "resources/list",
             "params": {}
         }
-        async with session.post(f"{base_url}/mcp", json=list_resources_request) as resp:
+        async with session.post(f"{mcp_endpoint}?sessionId={session_id}", json=list_resources_request) as resp:
             response = await resp.json()
             print(f"Status: {resp.status}")
             print(f"Response: {json.dumps(response, indent=2)}")
         
-        # 6. Call Tool (Spawn)
+        # 7. Call Tool (Spawn)
         print("\n--- Testing tools/call (spawn_object) ---")
         spawn_request = {
             "jsonrpc": "2.0",
@@ -117,7 +147,7 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
                 }
             }
         }
-        async with session.post(f"{base_url}/mcp", json=spawn_request) as resp:
+        async with session.post(f"{mcp_endpoint}?sessionId={session_id}", json=spawn_request) as resp:
             response = await resp.json()
             print(f"Status: {resp.status}")
             print(f"Response: {json.dumps(response, indent=2)}")
@@ -130,7 +160,7 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
                     uuid = data.get("uuid")
             
             if uuid:
-                # 7. Read Resource
+                # 8. Read Resource
                 print(f"\n--- Testing resources/read (for {uuid}) ---")
                 read_resource_request = {
                     "jsonrpc": "2.0",
@@ -140,12 +170,12 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
                         "uri": f"mcp://unity/scenes/MainScene/objects/{uuid}"
                     }
                 }
-                async with session.post(f"{base_url}/mcp", json=read_resource_request) as resp:
+                async with session.post(f"{mcp_endpoint}?sessionId={session_id}", json=read_resource_request) as resp:
                     response = await resp.json()
                     print(f"Status: {resp.status}")
                     print(f"Response: {json.dumps(response, indent=2)}")
                 
-                # 8. Call Tool (Transform)
+                # 9. Call Tool (Transform)
                 print(f"\n--- Testing tools/call (transform_object for {uuid}) ---")
                 transform_request = {
                     "jsonrpc": "2.0",
@@ -159,31 +189,10 @@ async def test_mcp_http(base_url: str = "http://localhost:8081"):
                         }
                     }
                 }
-                async with session.post(f"{base_url}/mcp", json=transform_request) as resp:
+                async with session.post(f"{mcp_endpoint}?sessionId={session_id}", json=transform_request) as resp:
                     response = await resp.json()
                     print(f"Status: {resp.status}")
                     print(f"Response: {json.dumps(response, indent=2)}")
-        
-        # 9. Test SSE (optional - just connect and receive a few events)
-        print("\n--- Testing SSE Connection ---")
-        print("Connecting to SSE endpoint...")
-        try:
-            async with session.get(f"{base_url}/sse") as resp:
-                print(f"SSE Status: {resp.status}")
-                if resp.status == 200:
-                    print("Receiving events (will stop after 10 seconds)...")
-                    async for line in resp.content:
-                        decoded = line.decode('utf-8').strip()
-                        if decoded:
-                            print(f"  {decoded}")
-                        # Just show a few events then exit
-                        await asyncio.sleep(0.1)
-                        if asyncio.get_event_loop().time() > asyncio.get_event_loop().time() + 10:
-                            break
-        except asyncio.TimeoutError:
-            print("SSE connection test completed")
-        except Exception as e:
-            print(f"SSE test skipped: {e}")
 
 if __name__ == "__main__":
     asyncio.run(test_mcp_http())
