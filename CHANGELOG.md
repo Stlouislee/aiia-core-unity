@@ -5,6 +5,33 @@ All notable changes to Unity LiveLink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-03-10
+
+### Added
+
+- **Embedded Agent Runtime** built on Microsoft Agent Framework, including:
+  - `EmbeddedAgentRuntime` component for in-app QA and tool calling
+  - `AgentRuntimeConfig` asset and editor tooling
+  - support for downstream HTTP and stdio MCP servers
+  - inspector test prompt workflow for validating the embedded agent in Play Mode
+- **Agent-facing MCP tools** for read-heavy QA and additional scene mutation support:
+  - `read_scene_info`, `read_scene_hierarchy`, `read_object`, `read_object_components`, `read_component_snapshot`, `read_selection`, `read_recent_events`
+  - `rename_object`, `set_parent`, `set_active`
+- **Package import support for embedded agent dependencies**, including vendored Agent Framework / MCP assemblies and linker configuration
+
+### Changed
+
+- Built-in LiveLink MCP is now documented and configured as a **Streamable HTTP-first** server on `/mcp`, with legacy `/sse` compatibility retained for older clients
+- Local embedded-agent connections now prefer the built-in `/mcp` endpoint and modern MCP transport behavior
+- Embedded agent editor UX now includes menu actions for creating the config asset and runtime component, plus a one-click suggested test prompt
+- Documentation, README guidance, and Copilot instructions now cover the embedded agent workflow and updated MCP transport expectations
+
+### Fixed
+
+- Fixed Unity import/editor issues around assembly definition layout and hidden `Documentation~` metadata
+- Fixed several Unity API obsolescence warnings and logging gaps that made embedded-agent initialization harder to debug
+- Improved MCP HTTP transport handling for local loopback debugging, including readiness checks, empty-response handling, and protocol version alignment
+
 ## [1.2.1] - 2026-02-14
 
 ### Fixed

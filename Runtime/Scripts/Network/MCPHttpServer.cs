@@ -18,6 +18,7 @@ namespace LiveLink
     /// </summary>
     internal class MCPSession
     {
+        public SemaphoreSlim WriteLock { get; } = new SemaphoreSlim(1, 1);
         public string SessionId { get; set; }
         public DateTime CreatedAt { get; set; }
         public DateTime LastActivityAt { get; set; }
@@ -161,13 +162,18 @@ namespace LiveLink
                 // CORS headers
                 response.AddHeader("Access-Control-Allow-Origin", "*");
                 response.AddHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-                response.AddHeader("Access-Control-Allow-Headers", "Content-Type");
+                response.AddHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Origin, MCP-Protocol-Version, MCP-Session-Id, Last-Event-ID");
+
+                if (!IsAllowedOrigin(request))
+                {
+                    CloseEmptyResponse(response, 403);
+                    return;
+                }
 
                 // Handle OPTIONS preflight
                 if (request.HttpMethod == "OPTIONS")
                 {
-                    response.StatusCode = 204;
-                    response.Close();
+                    CloseEmptyResponse(response, 204);
                     return;
                 }
 
@@ -181,10 +187,13 @@ namespace LiveLink
                         {
                             await HandleMCPRequestAsync(request, response);
                         }
+                        else if (request.HttpMethod == "GET")
+                        {
+                            await HandleSSEConnectionAsync(request, response, emitLegacyEndpointEvent: false);
+                        }
                         else
                         {
-                            response.StatusCode = 405; // Method Not Allowed
-                            response.Close();
+                            CloseEmptyResponse(response, 405);
                         }
                         break;
 
@@ -192,12 +201,11 @@ namespace LiveLink
                     case "/sse/":
                         if (request.HttpMethod == "GET")
                         {
-                            await HandleSSEConnectionAsync(response);
+                            await HandleSSEConnectionAsync(request, response, emitLegacyEndpointEvent: true);
                         }
                         else
                         {
-                            response.StatusCode = 405;
-                            response.Close();
+                            CloseEmptyResponse(response, 405);
                         }
                         break;
 
@@ -217,8 +225,7 @@ namespace LiveLink
                         break;
 
                     default:
-                        response.StatusCode = 404;
-                        response.Close();
+                        CloseEmptyResponse(response, 404);
                         break;
                 }
             }
@@ -227,8 +234,7 @@ namespace LiveLink
                 Debug.LogError($"[LiveLink-MCP] Error handling request: {ex.Message}");
                 try
                 {
-                    response.StatusCode = 500;
-                    response.Close();
+                    CloseEmptyResponse(response, 500);
                 }
                 catch { }
             }
@@ -239,7 +245,7 @@ namespace LiveLink
             try
             {
                 // Add MCP protocol version header
-                response.AddHeader("MCP-Protocol-Version", "2024-11-05");
+                response.AddHeader("MCP-Protocol-Version", "2025-11-25");
 
                 // Extract and validate sessionId from query string
                 string sessionId = request.QueryString["sessionId"];
@@ -283,8 +289,9 @@ namespace LiveLink
 
                 // Session validation based on method
                 string method = mcpRequest.Method;
-                bool requiresSession = method != "initialize";
-                bool requiresInitialized = method != "initialize" && method != "notifications/initialized";
+                bool usesLegacySseSession = !string.IsNullOrEmpty(sessionId);
+                bool requiresSession = usesLegacySseSession && method != "initialize";
+                bool requiresInitialized = usesLegacySseSession && method != "initialize" && method != "notifications/initialized";
 
                 if (requiresSession && session == null)
                 {
@@ -316,58 +323,59 @@ namespace LiveLink
                     return;
                 }
 
-                // Process request on main thread
                 MCPResponse mcpResponse = null;
-                var tcs = new TaskCompletionSource<MCPResponse>();
-                
-                MainThreadDispatcher.Enqueue(async () =>
+
+                // The MCP client handshake uses initialize before any Unity state access.
+                // Handling it directly avoids depending on a frame tick during startup.
+                if (method == "initialize" || method == "notifications/initialized")
                 {
                     try
                     {
                         mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
-                        
-                        // Mark session as initialized after successful initialize method
-                        if (method == "initialize" && mcpResponse != null && mcpResponse.Error == null && session != null)
-                        {
-                            lock (_sessionsLock)
-                            {
-                                session.IsInitialized = true;
-                                // Store client info if present in params
-                                if (mcpRequest.Params != null && mcpRequest.Params["clientInfo"] != null)
-                                {
-                                    session.ClientInfo = mcpRequest.Params["clientInfo"] as JObject;
-                                }
-                            }
-                            Debug.Log($"[LiveLink-MCP] Session {sessionId} initialized");
-                        }
-                        
-                        tcs.SetResult(mcpResponse);
+                        MarkSessionInitializedIfNeeded(method, mcpRequest, mcpResponse, session, sessionId);
                     }
                     catch (Exception ex)
                     {
-                        Debug.LogError($"[LiveLink-MCP] Error processing request: {ex.Message}");
-                        tcs.SetResult(new MCPResponse
+                        Debug.LogError($"[LiveLink-MCP] Error processing request '{method}': {ex}");
+                        mcpResponse = new MCPResponse
                         {
                             Id = mcpRequest?.Id,
                             Error = new MCPError { Code = -32603, Message = $"Internal error: {ex.Message}" }
-                        });
+                        };
                     }
-                });
+                }
+                else
+                {
+                    // Scene/resource/tool requests may touch Unity APIs, so those stay on the main thread.
+                    var tcs = new TaskCompletionSource<MCPResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-                mcpResponse = await tcs.Task;
+                    MainThreadDispatcher.Enqueue(() =>
+                    {
+                        _ = ProcessRequestOnMainThreadAsync(method, mcpRequest, session, sessionId, tcs);
+                    });
+
+                    mcpResponse = await tcs.Task;
+                }
 
                 // For notifications (like initialized), no response is sent
                 if (mcpResponse == null)
                 {
-                    response.StatusCode = 204; // No Content
-                    response.Close();
+                    CloseEmptyResponse(response, 202);
                     return;
                 }
 
-                // Send response
+                string responseBody = PacketSerializer.Serialize(mcpResponse);
+
+                if (usesLegacySseSession && session != null && session.SseConnection != null)
+                {
+                    await SendSSEMessageAsync(session, responseBody);
+                    CloseEmptyResponse(response, 202);
+                    Debug.Log($"[LiveLink-MCP] Sent SSE response: {responseBody}");
+                    return;
+                }
+
                 response.ContentType = "application/json";
                 response.StatusCode = 200;
-                string responseBody = PacketSerializer.Serialize(mcpResponse);
                 byte[] responseData = Encoding.UTF8.GetBytes(responseBody);
                 await response.OutputStream.WriteAsync(responseData, 0, responseData.Length);
                 response.Close();
@@ -382,7 +390,7 @@ namespace LiveLink
             }
         }
 
-        private async Task HandleSSEConnectionAsync(HttpListenerResponse response)
+        private async Task HandleSSEConnectionAsync(HttpListenerRequest request, HttpListenerResponse response, bool emitLegacyEndpointEvent)
         {
             string sessionId = Guid.NewGuid().ToString("N");
             MCPSession session = null;
@@ -406,8 +414,12 @@ namespace LiveLink
 
                 // Send initial endpoint event as per MCP spec
                 // The URI should be where the client sends POST requests
-                string endpointUri = $"/mcp?sessionId={sessionId}";
-                await SendSSEEventAsync(response, "endpoint", endpointUri);
+                if (emitLegacyEndpointEvent)
+                {
+                    string endpointUri = BuildSessionEndpointUri(request, sessionId);
+                    Debug.Log($"[LiveLink-MCP] Sending endpoint event for session {sessionId}: {endpointUri}");
+                    await SendSSEEventAsync(response, "endpoint", endpointUri);
+                }
 
                 // Keep connection alive
                 while (_isRunning)
@@ -415,11 +427,7 @@ namespace LiveLink
                     await Task.Delay(30000); // Send heartbeat every 30 seconds
                     if (_isRunning)
                     {
-                        // Send a comment as heartbeat to keep connection alive without triggering events
-                        string heartbeat = ": heartbeat\n\n";
-                        byte[] buffer = Encoding.UTF8.GetBytes(heartbeat);
-                        await response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
-                        await response.OutputStream.FlushAsync();
+                        await SendHeartbeatAsync(session);
                     }
                 }
             }
@@ -512,9 +520,128 @@ namespace LiveLink
             {
                 if (session.SseConnection != null)
                 {
-                    _ = SendSSEEventAsync(session.SseConnection, eventType, data);
+                    _ = SendSessionEventAsync(session, eventType, data);
                 }
             }
+        }
+
+        private static void CloseEmptyResponse(HttpListenerResponse response, int statusCode)
+        {
+            response.StatusCode = statusCode;
+            response.ContentLength64 = 0;
+            response.SendChunked = false;
+            response.Close();
+        }
+
+        private static bool IsAllowedOrigin(HttpListenerRequest request)
+        {
+            string origin = request?.Headers["Origin"];
+            if (string.IsNullOrWhiteSpace(origin))
+            {
+                return true;
+            }
+
+            if (!Uri.TryCreate(origin, UriKind.Absolute, out Uri originUri))
+            {
+                return false;
+            }
+
+            return string.Equals(originUri.Host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(originUri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private async Task SendHeartbeatAsync(MCPSession session)
+        {
+            if (session == null || session.SseConnection == null)
+            {
+                return;
+            }
+
+            await session.WriteLock.WaitAsync();
+            try
+            {
+                string heartbeat = ": heartbeat\n\n";
+                byte[] buffer = Encoding.UTF8.GetBytes(heartbeat);
+                await session.SseConnection.OutputStream.WriteAsync(buffer, 0, buffer.Length);
+                await session.SseConnection.OutputStream.FlushAsync();
+            }
+            finally
+            {
+                session.WriteLock.Release();
+            }
+        }
+
+        private Task SendSSEMessageAsync(MCPSession session, string data)
+        {
+            if (session == null || session.SseConnection == null)
+            {
+                throw new InvalidOperationException("Cannot send an SSE message without an active session.");
+            }
+
+            return SendSessionEventAsync(session, "message", data);
+        }
+
+        private async Task SendSessionEventAsync(MCPSession session, string eventType, string data)
+        {
+            await session.WriteLock.WaitAsync();
+            try
+            {
+                await SendSSEEventAsync(session.SseConnection, eventType, data);
+            }
+            finally
+            {
+                session.WriteLock.Release();
+            }
+        }
+
+        private async Task ProcessRequestOnMainThreadAsync(string method, MCPRequest mcpRequest, MCPSession session, string sessionId, TaskCompletionSource<MCPResponse> tcs)
+        {
+            try
+            {
+                MCPResponse mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
+                MarkSessionInitializedIfNeeded(method, mcpRequest, mcpResponse, session, sessionId);
+                tcs.TrySetResult(mcpResponse);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[LiveLink-MCP] Error processing request '{method}' on main thread: {ex}");
+                tcs.TrySetResult(new MCPResponse
+                {
+                    Id = mcpRequest?.Id,
+                    Error = new MCPError { Code = -32603, Message = $"Internal error: {ex.Message}" }
+                });
+            }
+        }
+
+        private void MarkSessionInitializedIfNeeded(string method, MCPRequest mcpRequest, MCPResponse mcpResponse, MCPSession session, string sessionId)
+        {
+            if (method != "initialize" || mcpResponse == null || mcpResponse.Error != null || session == null)
+            {
+                return;
+            }
+
+            lock (_sessionsLock)
+            {
+                session.IsInitialized = true;
+                if (mcpRequest.Params != null && mcpRequest.Params["clientInfo"] != null)
+                {
+                    session.ClientInfo = mcpRequest.Params["clientInfo"] as JObject;
+                }
+            }
+
+            Debug.Log($"[LiveLink-MCP] Session {sessionId} initialized");
+        }
+
+        private string BuildSessionEndpointUri(HttpListenerRequest request, string sessionId)
+        {
+            Uri requestUrl = request != null ? request.Url : null;
+            if (requestUrl == null)
+            {
+                return $"/mcp?sessionId={sessionId}";
+            }
+
+            string authority = requestUrl.GetLeftPart(UriPartial.Authority);
+            return $"{authority}/mcp?sessionId={sessionId}";
         }
 
         public void Dispose()

@@ -399,7 +399,7 @@ namespace LiveLink.Editor
         private static void CreateManager()
         {
             // Check if manager already exists
-            var existing = Object.FindObjectOfType<LiveLinkManager>();
+            var existing = FindExistingManager();
             if (existing != null)
             {
                 Selection.activeGameObject = existing.gameObject;
@@ -413,8 +413,17 @@ namespace LiveLink.Editor
             go.AddComponent<LiveLinkManager>();
             Selection.activeGameObject = go;
             Undo.RegisterCreatedObjectUndo(go, "Create LiveLink Manager");
-            
+
             Debug.Log("[LiveLink] Created LiveLinkManager in the scene.");
+        }
+
+        private static LiveLinkManager FindExistingManager()
+        {
+#if UNITY_2022_2_OR_NEWER
+            return Object.FindAnyObjectByType<LiveLinkManager>();
+#else
+            return Object.FindObjectOfType<LiveLinkManager>();
+#endif
         }
 
         [MenuItem("LiveLink/Documentation", false, 100)]

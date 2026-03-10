@@ -94,6 +94,30 @@ namespace LiveLink
         public bool IsMCPServerRunning => _mcpHttpServer?.IsRunning ?? false;
 
         /// <summary>
+        /// Gets or sets the MCP HTTP server port.
+        /// </summary>
+        public int MCPPort
+        {
+            get => _mcpPort;
+            set => _mcpPort = value;
+        }
+
+        /// <summary>
+        /// Gets the local MCP endpoint used by streamable HTTP clients.
+        /// </summary>
+        public string LocalMCPEndpoint => $"http://127.0.0.1:{_mcpPort}/mcp";
+
+        /// <summary>
+        /// Gets the local SSE endpoint used by MCP clients.
+        /// </summary>
+        public string LocalMCPSseEndpoint => $"http://127.0.0.1:{_mcpPort}/sse";
+
+        /// <summary>
+        /// Gets the local MCP POST endpoint base URI.
+        /// </summary>
+        public string LocalMCPHttpBaseUrl => $"http://127.0.0.1:{_mcpPort}/";
+
+        /// <summary>
         /// Gets or sets the server port.
         /// </summary>
         public int Port
@@ -745,7 +769,7 @@ namespace LiveLink
             }
             else
             {
-                var cameras = FindObjectsOfType<Camera>();
+                var cameras = FindSceneCameras();
                 foreach (var c in cameras)
                 {
                     if (c.tag == cameraTag || c.name == cameraTag)
@@ -837,6 +861,15 @@ namespace LiveLink
             }
 
             return ResponsePacket.Ok("View context", command.RequestId, contextData);
+        }
+
+        private static Camera[] FindSceneCameras()
+        {
+#if UNITY_2022_2_OR_NEWER
+            return FindObjectsByType<Camera>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+#else
+            return FindObjectsOfType<Camera>();
+#endif
         }
 
         #endregion

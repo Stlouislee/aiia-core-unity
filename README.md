@@ -12,6 +12,21 @@ A lightweight Unity package that establishes a bidirectional WebSocket bridge be
 - 🖥️ **Custom Editor**: Easy-to-use inspector with status display and controls
 - 🤝 **MCP Support**: JSON-RPC endpoint exposing scene resources and Unity tools
 
+## Additional Documentation
+
+- [Embedded Agent Framework MVP](Documentation~/Embedded-Agent-Framework-MVP.md) - architecture for embedding Microsoft Agent Framework in the Unity app, using LiveLink MCP as the default first-party capability server and allowing users to attach additional downstream MCP servers for the embedded agent.
+
+## Embedded Agent Runtime
+
+The package now includes an embedded Microsoft Agent Framework runtime for single-app Unity deployments.
+
+- Add an `EmbeddedAgentRuntime` component when you want in-app QA and tool calling.
+- Create an `AgentRuntimeConfig` asset to configure the model, the default local LiveLink MCP connection, and any optional downstream MCP servers.
+- Use `LiveLink > Create Agent Runtime Config` to create the config asset from the Unity menu.
+- LiveLink MCP remains the default first-party server for the embedded agent.
+- Downstream MCP servers are configured for the agent only and are not bridged back through LiveLink MCP.
+- Stdio-based downstream MCP servers are intended for the Unity Editor and standalone desktop players.
+
 ## Installation
 
 ### Via Unity Package Manager (Git URL)
@@ -32,6 +47,8 @@ https://github.com/Stlouislee/aiia-core-unity.git
 1. Clone or download this repository
 2. Copy the contents into your project's `Packages/com.livelink.core/` folder
 
+The Agent Framework and MCP client dependencies are vendored inside `Runtime/Plugins/AgentFramework` and explicitly referenced by `LiveLink.AgentRuntime`, so the package can be imported without adding NuGet tooling to Unity.
+
 ## Quick Start
 
 ### 1. Add LiveLink Manager to Your Scene
@@ -45,7 +62,7 @@ https://github.com/Stlouislee/aiia-core-unity.git
 |----------|-------------|
 | **Port** | WebSocket server port (default: 8080) |
 | **MCP Port** | MCP HTTP server port (default: 8081) |
-| **Enable MCP Server** | Enable HTTP + SSE transport for MCP protocol |
+| **Enable MCP Server** | Enable the MCP HTTP server on `/mcp` with legacy `/sse` compatibility |
 | **Auto Start** | Start server automatically on Play |
 | **Scope** | `WholeScene` or `TargetObjectOnly` |
 | **Target Root** | Root object when using TargetObjectOnly scope |
@@ -57,18 +74,72 @@ https://github.com/Stlouislee/aiia-core-unity.git
 
 The server will start automatically (if Auto Start is enabled) and begin accepting WebSocket connections.
 
+### 4. Optional: Add the Embedded Agent
+
+- Create a config asset from `LiveLink > Create Agent Runtime Config`.
+- Add `EmbeddedAgentRuntime` to a GameObject.
+- Assign the config asset and a `LiveLinkManager`.
+- Press Play to let the runtime connect to the local LiveLink MCP server and any enabled downstream MCP servers.
+
+### 5. AgentRuntimeConfig Example
+
+Typical MVP setup:
+
+- `Agent Name`: `LiveLink Agent`
+- `OpenAI Model`: `gpt-4o-mini`
+- `Prefer Environment API Key`: enabled
+- `API Key Environment Variable`: `OPENAI_API_KEY`
+- `System Instructions`: tell the agent to inspect the Unity scene through MCP before answering
+- `Enable Local LiveLink MCP`: enabled
+- `Auto Start Local MCP`: enabled
+- `HTTP Transport Mode`: `StreamableHttp`
+- `Connection Timeout`: `15`
+- `Allow Scene Mutation Tools`: enabled for editing flows, disabled for read-only QA
+
+Example downstream HTTP MCP server:
+
+- `Display Name`: `Docs MCP`
+- `Enabled`: enabled
+- `Transport Type`: `Http`
+- `Endpoint`: your MCP SSE or streamable HTTP endpoint
+- `HTTP Transport Mode`: `StreamableHttp`
+- `Connection Timeout`: `30`
+- `Headers`: optional auth headers such as `Authorization: Bearer ...`
+
+Example downstream stdio MCP server:
+
+- `Display Name`: `Filesystem MCP`
+- `Enabled`: enabled
+- `Transport Type`: `Stdio`
+- `Command`: the server executable
+- `Arguments`: startup arguments for that MCP server
+- `Working Directory`: optional process working directory
+- `Environment Variables`: optional process environment entries
+
+Field guide:
+
+- `Agent Name` controls the logical name seen by the agent runtime.
+- `OpenAI Model` selects the chat model used for reasoning and tool selection.
+- `Prefer Environment API Key` keeps secrets out of the asset when possible.
+- `Fallback API Key` is only used when the configured environment variable is missing.
+- `Enable Local LiveLink MCP` keeps your first-party Unity MCP surface available to the embedded agent.
+- `HTTP Transport Mode` for the built-in LiveLink MCP should normally stay on `StreamableHttp`; legacy `Sse` is only for backward compatibility.
+- `Allow Scene Mutation Tools` gates write operations such as spawn, transform, delete, rename, reparent, and active-state changes.
+- `Use Tool Allow List` on an external server lets you expose only selected tools from that server to the agent.
+
 ## Communication Protocol
 
 Unity LiveLink provides two transport mechanisms for different use cases:
 
 ### Transport Comparison
 
-| Feature | **WebSocket** (Port 8080) | **HTTP+SSE** (Port 8081) |
+| Feature | **WebSocket** (Port 8080) | **MCP HTTP** (Port 8081) |
 |---------|--------------------------|--------------------------|
 | **Protocol** | Custom JSON | MCP (Model Context Protocol) |
-| **Session Management** | Implicit (connection-based) | Explicit (sessionId required) |
+| **Primary Endpoint** | `ws://localhost:8080/` | `http://localhost:8081/mcp` |
+| **Session Management** | Implicit (connection-based) | Streamable HTTP by default, legacy session-based SSE supported |
 | **Authentication** | None | Session-based validation |
-| **Bidirectional** | Yes (full duplex) | Request/Response + SSE events |
+| **Bidirectional** | Yes (full duplex) | Request/Response, optional SSE stream |
 | **Auto-reconnect** | Client handles | Client must re-establish session |
 | **Use Case** | Simple scripting, real-time sync | LLM agents, MCP-compatible tools |
 | **Initialization** | Automatic scene dump on connect | Explicit `initialize` handshake |
@@ -78,7 +149,7 @@ Unity LiveLink provides two transport mechanisms for different use cases:
 - Need low-latency bidirectional communication
 - Don't require MCP standard compliance
 
-**Choose HTTP+SSE when:**
+**Choose MCP HTTP when:**
 - Integrating with MCP-compatible LLM clients (Claude Desktop, etc.)
 - Need explicit session lifecycle control
 - Require RESTful request/response pattern
@@ -89,24 +160,25 @@ Unity LiveLink provides two transport mechanisms for different use cases:
 
 All communication uses JSON over WebSocket. Connect to `ws://localhost:8080/` (or your configured port).
 
-### MCP (Model Context Protocol) - HTTP+SSE Transport (Port 8081)
+### MCP (Model Context Protocol) - HTTP Transport (Port 8081)
 
-Unity LiveLink implements the official MCP HTTP+SSE transport specification with full session management.
+Unity LiveLink exposes MCP on `http://localhost:8081/mcp` using Streamable HTTP as the primary transport. A legacy `GET /sse` compatibility endpoint is also available for older clients that still rely on the deprecated HTTP+SSE workflow.
 
 #### Session Workflow
 
-1. **Connect to SSE endpoint** (`GET /sse`)
-   - Server creates a session and sends an `endpoint` event with `sessionId`
-   - Keep the SSE connection alive to maintain the session
-   
-2. **Send POST requests** to the endpoint URL (`POST /mcp?sessionId={sessionId}`)
-   - Include the `sessionId` query parameter in all requests
-   - First request must be `initialize` to authenticate the session
-   - Session expires after 5 minutes of inactivity
-   
-3. **Session Validation**
-   - `initialize`: Creates session state, no prior session required
-   - Other methods: Require valid, initialized session
+1. **Preferred transport: Streamable HTTP**
+   - Send MCP JSON-RPC requests directly to `POST /mcp`
+   - Start with `initialize`, then `notifications/initialized`, then normal MCP methods
+   - This is the recommended path for the embedded agent and modern MCP SDKs
+
+2. **Legacy compatibility transport: HTTP+SSE**
+   - Connect to `GET /sse`
+   - Server sends an `endpoint` event containing `POST /mcp?sessionId={sessionId}`
+   - Keep the SSE connection alive while posting requests to that session endpoint
+
+3. **Legacy session validation**
+   - `initialize`: creates session state
+   - Other methods: require a valid initialized legacy SSE session
    - Error codes: `-32001` (session required), `-32002` (not initialized)
 
 #### Available Methods
@@ -188,7 +260,7 @@ Response:
 #### Example Session Flow
 
 ```json
-**Step 1: Connect to SSE**
+**Legacy SSE Example - Step 1: Connect to SSE**
 ```
 GET http://localhost:8081/sse
 ```
@@ -283,7 +355,7 @@ POST http://localhost:8081/mcp?sessionId=a1b2c3d4...
 
 **Session Errors**
 
-- **-32001**: Session required - Connect to `/sse` first to obtain a `sessionId`
+- **-32001**: Session required - legacy SSE clients must connect to `/sse` first to obtain a `sessionId`
 - **-32002**: Session not initialized - Send `initialize` method before other operations
 - Session expires after 5 minutes of inactivity
 
@@ -399,6 +471,24 @@ Load from base64-encoded `.glb`:
 }
 ```
 **Returns:** Camera position, orientation, forward/right/up vectors, field of view, raycast hit info, and optionally visible objects.
+
+#### Read-Optimized Agent Tools
+
+These tools mirror the `unity://` resources but are easier for embedded agents to use during QA flows.
+
+- `read_scene_info` - Read the active scene summary
+- `read_scene_hierarchy` - Read the hierarchy tree with configurable depth
+- `read_object` - Read one GameObject by `uuid` or `instance_id`
+- `read_object_components` - Read the components attached to a GameObject
+- `read_component_snapshot` - Read a specific component snapshot
+- `read_selection` - Read the current Unity Editor selection
+- `read_recent_events` - Read tracked scene events
+
+#### Additional Mutation Tools
+
+- `rename_object` - Rename an existing GameObject
+- `set_parent` - Reparent a GameObject
+- `set_active` - Enable or disable a GameObject
 
 #### Planned Tools
 
