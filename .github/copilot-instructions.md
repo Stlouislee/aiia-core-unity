@@ -128,6 +128,7 @@ Do **not** proxy or re-expose them through LiveLink MCP.
 - If an old asset still points local LiveLink to `Sse`, runtime code may normalize that to the modern `/mcp` path.
 - External MCP servers may use HTTP (`AutoDetect` / `StreamableHttp` / `Sse`) or stdio, depending on platform.
 - Stdio support is intended for the Unity Editor and desktop players.
+- `EmbeddedAgentRuntime` exposes public UnityEvents for UI integration: `OnResponseReceived`, `OnError`, `OnStatusChanged`, and `OnToolCall(toolName, jsonParameters)`.
 
 ## When Editing MCP Tools
 

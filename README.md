@@ -127,6 +127,19 @@ Field guide:
 - `Allow Scene Mutation Tools` gates write operations such as spawn, transform, delete, rename, reparent, and active-state changes.
 - `Use Tool Allow List` on an external server lets you expose only selected tools from that server to the agent.
 
+### 6. External UI Event Hooks
+
+`EmbeddedAgentRuntime` now exposes UnityEvents that can be wired directly from custom UI components:
+
+- `OnResponseReceived` (`UnityEvent<string>`) - final text response from the agent.
+- `OnError` (`UnityEvent<string>`) - initialization/request errors.
+- `OnStatusChanged` (`UnityEvent<string>`) - runtime progress such as connecting, running, and ready states.
+- `OnToolCall` (`UnityEvent<string, string>`) - tool invocation notifications (`toolName`, `jsonParameters`).
+
+These events are public on the component and visible in the inspector, so UI prefabs can subscribe without modifying package code.
+
+`AgentRuntimeConfig` already exposes public getters (for example `OpenAIModel`) so UI code can display active runtime settings.
+
 ## Communication Protocol
 
 Unity LiveLink provides two transport mechanisms for different use cases:

@@ -21,6 +21,7 @@ namespace LiveLink.Agent.Editor
         private SerializedProperty _onResponseReceived;
         private SerializedProperty _onError;
         private SerializedProperty _onStatusChanged;
+        private SerializedProperty _onToolCall;
 
         private void OnEnable()
         {
@@ -29,9 +30,10 @@ namespace LiveLink.Agent.Editor
             _autoInitialize = serializedObject.FindProperty("_autoInitialize");
             _createSessionOnInitialize = serializedObject.FindProperty("_createSessionOnInitialize");
             _persistAcrossScenes = serializedObject.FindProperty("_persistAcrossScenes");
-            _onResponseReceived = serializedObject.FindProperty("_onResponseReceived");
-            _onError = serializedObject.FindProperty("_onError");
-            _onStatusChanged = serializedObject.FindProperty("_onStatusChanged");
+            _onResponseReceived = serializedObject.FindProperty("OnResponseReceived");
+            _onError = serializedObject.FindProperty("OnError");
+            _onStatusChanged = serializedObject.FindProperty("OnStatusChanged");
+            _onToolCall = serializedObject.FindProperty("OnToolCall");
         }
 
         public override void OnInspectorGUI()
@@ -53,6 +55,7 @@ namespace LiveLink.Agent.Editor
             EditorGUILayout.PropertyField(_onResponseReceived);
             EditorGUILayout.PropertyField(_onError);
             EditorGUILayout.PropertyField(_onStatusChanged);
+            EditorGUILayout.PropertyField(_onToolCall);
 
             serializedObject.ApplyModifiedProperties();
 

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Agents.AI;
@@ -11,6 +12,7 @@ using ModelContextProtocol.Client;
 using OpenAI;
 using UnityEngine;
 using UnityEngine.Events;
+using UnityEngine.Serialization;
 
 namespace LiveLink.Agent
 {
@@ -32,6 +34,11 @@ namespace LiveLink.Agent
         {
         }
 
+        [Serializable]
+        public sealed class AgentToolCallEvent : UnityEvent<string, string>
+        {
+        }
+
         [SerializeField]
         private AgentRuntimeConfig _config;
 
@@ -48,14 +55,16 @@ namespace LiveLink.Agent
         private bool _persistAcrossScenes = true;
 
         [Header("Events")]
-        [SerializeField]
-        private AgentTextEvent _onResponseReceived = new AgentTextEvent();
+        [FormerlySerializedAs("_onResponseReceived")]
+        public AgentTextEvent OnResponseReceived = new AgentTextEvent();
 
-        [SerializeField]
-        private AgentTextEvent _onError = new AgentTextEvent();
+        [FormerlySerializedAs("_onError")]
+        public AgentTextEvent OnError = new AgentTextEvent();
 
-        [SerializeField]
-        private AgentTextEvent _onStatusChanged = new AgentTextEvent();
+        [FormerlySerializedAs("_onStatusChanged")]
+        public AgentTextEvent OnStatusChanged = new AgentTextEvent();
+
+        public AgentToolCallEvent OnToolCall = new AgentToolCallEvent();
 
         private readonly SemaphoreSlim _initializationLock = new SemaphoreSlim(1, 1);
         private readonly SemaphoreSlim _runLock = new SemaphoreSlim(1, 1);
@@ -223,7 +232,7 @@ namespace LiveLink.Agent
                 _lastError = ex.ToString();
                 Debug.LogError(string.Format("[LiveLink-Agent] Initialization failed: {0}", _lastError));
                 SetStatus("Agent initialization failed.");
-                DispatchToMainThread(() => _onError.Invoke(_lastError));
+                DispatchToMainThread(() => OnError.Invoke(_lastError));
                 await DisposeConnectionsAsync().ConfigureAwait(false);
                 throw;
             }
@@ -285,7 +294,7 @@ namespace LiveLink.Agent
                 var response = await _agent.RunAsync(message, _session).ConfigureAwait(false);
                 _lastResponse = response != null ? response.ToString() : string.Empty;
                 SetStatus("Response received.");
-                DispatchToMainThread(() => _onResponseReceived.Invoke(_lastResponse));
+                DispatchToMainThread(() => OnResponseReceived.Invoke(_lastResponse));
                 return _lastResponse;
             }
             catch (Exception ex)
@@ -293,7 +302,7 @@ namespace LiveLink.Agent
                 _lastError = ex.ToString();
                 Debug.LogError(string.Format("[LiveLink-Agent] Request failed: {0}", _lastError));
                 SetStatus("Agent request failed.");
-                DispatchToMainThread(() => _onError.Invoke(_lastError));
+                DispatchToMainThread(() => OnError.Invoke(_lastError));
                 throw;
             }
             finally
@@ -382,7 +391,7 @@ namespace LiveLink.Agent
                     continue;
                 }
 
-                connectedServer.Tools.Add(tool);
+                connectedServer.Tools.Add(WrapToolForEvent(tool));
                 connectedServer.ToolNames.Add(tool.Name);
             }
 
@@ -652,7 +661,77 @@ namespace LiveLink.Agent
         private void SetStatus(string status)
         {
             _status = status;
-            DispatchToMainThread(() => _onStatusChanged.Invoke(_status));
+            DispatchToMainThread(() => OnStatusChanged.Invoke(_status));
+        }
+
+        private AITool WrapToolForEvent(AITool tool)
+        {
+            if (tool is AIFunction function)
+            {
+                return new ToolCallNotifyingFunction(function, EmitToolCall);
+            }
+
+            return tool;
+        }
+
+        private void EmitToolCall(string toolName, string jsonParameters)
+        {
+            string safeToolName = string.IsNullOrWhiteSpace(toolName) ? "unknown_tool" : toolName;
+            string safeJson = string.IsNullOrWhiteSpace(jsonParameters) ? "{}" : jsonParameters;
+            DispatchToMainThread(() => OnToolCall.Invoke(safeToolName, safeJson));
+        }
+
+        private sealed class ToolCallNotifyingFunction : DelegatingAIFunction
+        {
+            private readonly Action<string, string> _onInvoked;
+
+            internal ToolCallNotifyingFunction(AIFunction innerFunction, Action<string, string> onInvoked)
+                : base(innerFunction)
+            {
+                _onInvoked = onInvoked;
+            }
+
+            protected override ValueTask<object> InvokeCoreAsync(AIFunctionArguments arguments, CancellationToken cancellationToken)
+            {
+                _onInvoked?.Invoke(Name, SerializeArguments(arguments));
+                return base.InvokeCoreAsync(arguments, cancellationToken);
+            }
+
+            private static string SerializeArguments(AIFunctionArguments arguments)
+            {
+                if (arguments == null || arguments.Count == 0)
+                {
+                    return "{}";
+                }
+
+                var payload = new Dictionary<string, object>(StringComparer.Ordinal);
+                foreach (KeyValuePair<string, object> entry in arguments)
+                {
+                    payload[entry.Key] = entry.Value;
+                }
+
+                try
+                {
+                    return JsonSerializer.Serialize(payload);
+                }
+                catch
+                {
+                    try
+                    {
+                        var fallback = new Dictionary<string, string>(StringComparer.Ordinal);
+                        foreach (KeyValuePair<string, object> entry in payload)
+                        {
+                            fallback[entry.Key] = entry.Value != null ? entry.Value.ToString() : "null";
+                        }
+
+                        return JsonSerializer.Serialize(fallback);
+                    }
+                    catch
+                    {
+                        return "{}";
+                    }
+                }
+            }
         }
 
         private static void DispatchToMainThread(Action action)

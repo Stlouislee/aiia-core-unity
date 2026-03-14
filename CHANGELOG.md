@@ -5,6 +5,21 @@ All notable changes to Unity LiveLink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added a public `OnToolCall` event on `EmbeddedAgentRuntime` (`UnityEvent<string, string>`) so external UI can react to tool execution with tool name and serialized arguments.
+
+### Changed
+
+- Exposed `EmbeddedAgentRuntime` UnityEvents as public inspector fields for external UI wiring: `OnResponseReceived`, `OnError`, and `OnStatusChanged`.
+- Updated `EmbeddedAgentRuntimeEditor` to bind to the public event field names and show `OnToolCall` in the inspector.
+
+### Fixed
+
+- Added serialized field migration support (`FormerlySerializedAs`) for renamed embedded runtime event fields to keep existing prefab/component event wiring intact.
+
 ## [1.3.0] - 2026-03-10
 
 ### Added

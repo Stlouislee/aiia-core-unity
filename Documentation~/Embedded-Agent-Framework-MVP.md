@@ -154,6 +154,13 @@ Responsibilities:
 - connect to any user-configured external MCP servers
 - stream model output and tool usage back to UI
 
+Runtime UI event surface:
+
+- `OnResponseReceived` (`UnityEvent<string>`) - final response text
+- `OnError` (`UnityEvent<string>`) - initialization/request failures
+- `OnStatusChanged` (`UnityEvent<string>`) - lifecycle status updates
+- `OnToolCall` (`UnityEvent<string, string>`) - tool name and serialized JSON arguments for per-tool UI feedback
+
 ### AgentRuntimeConfig
 
 Implemented as `Runtime/Agent/AgentRuntimeConfig.cs`.
@@ -165,6 +172,8 @@ Defines:
 - local LiveLink MCP connection settings
 - whether first-party scene mutation tools are enabled
 - the list of downstream MCP servers
+
+The config asset also exposes public getters so UI code can read active settings (for example selected model) without reflection.
 
 ### AgentExternalMcpServerConfig
 
