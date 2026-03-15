@@ -12,6 +12,70 @@ A lightweight Unity package that establishes a bidirectional WebSocket bridge be
 - 🖥️ **Custom Editor**: Easy-to-use inspector with status display and controls
 - 🤝 **MCP Support**: JSON-RPC endpoint exposing scene resources and Unity tools
 
+## Understanding LiveLink in Unity App
+
+LiveLink is a dedicated Unity package designed to bring advanced, extensible AI capabilities into your game scenes. Built upon the robust foundation of the Microsoft Agent Framework, LiveLink acts as both a runtime environment for AI entities and a direct communications bridge to the Unity engine's internal data.
+
+Here is a breakdown of the core components and capabilities as illustrated in the architecture diagram below:
+
+**Agent Runtime Environment:** LiveLink provides a specialized runtime (managed by the Microsoft Agent Framework) within the Unity Scene. This environment hosts multiple AI agents, supporting multi-agent collaboration or individual specialization. Examples include:
+
+- **Chat/QA Agents:** For interactive dialogue and querying.
+- **Workflow Agents:** For managing multi-step tasks or scene processes.
+- **Extensible Agents:** A modular system allows you to build custom agents tailored to specific game logic or even interface with External Tools/Editor Extensions for configuration and direct control.
+
+**LiveLink MCP Server (Scene-Related APIs):** This is the heart of the package's integration with Unity. The MCP (Model Context Protocol) Server serves as a single interface for agents to interact with the scene. It provides distinct APIs that agents can call to:
+
+- **List and Query Scene Objects:** Retrieve the current state of GameObjects.
+- **Manipulate Properties:** Change GameObject states (position, rotation, etc.) or execute component methods.
+- **Broadcast Events and Bridge Methods:** Connect AI-driven decisions to native Unity events or trigger game functions.
+
+**External Integration & High-Speed Links:** LiveLink is designed for flexibility. It can operate locally within the Unity Scene or interface with an External AI Core (off-device) over high-speed data links for complex reasoning or data access. This allows external, powerful models to control the internal Unity scene seamlessly through the MCP Server interface.
+
+### Architecture Diagram
+
+```mermaid
+flowchart LR
+    subgraph UnityScene [Unity Scene]
+        direction TB
+
+        subgraph LiveLink [LiveLink Package]
+            direction TB
+            subgraph MCPServer [LiveLink MCP Server]
+                SceneRelated[Scene Related APIs]
+            end
+
+            subgraph AgentRuntime [Agent Runtime]
+                Agent1[Agent 1 <br> e.g., Chat/QA]
+                Agent2[Agent 2 <br> e.g., Workflow]
+                Agent3[Agent n]
+            end
+
+            AgentRuntime -->|Calls / Queries| SceneRelated
+        end
+
+        GameObjects[GameObjects]
+        Datacore[e.g., Datacore]
+
+        SceneRelated -->|Reads / Manipulates| GameObjects
+        SceneRelated -->|Bridges to| Datacore
+    end
+
+    ExtAgent[External AI Agent]
+    ExtTool[External Tool]
+
+    ExtAgent -->|Connects to| SceneRelated
+    ExtTool -->|Interfaces with| Agent2
+
+    classDef runtime fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
+    classDef mcp fill:#fce4ec,stroke:#e91e63,stroke-width:2px;
+    classDef livelink fill:#f5f5f5,stroke:#333,stroke-width:2px;
+
+    class AgentRuntime runtime;
+    class MCPServer mcp;
+    class LiveLink livelink;
+```
+
 ## Additional Documentation
 
 - [Embedded Agent Framework MVP](Documentation~/Embedded-Agent-Framework-MVP.md) - architecture for embedding Microsoft Agent Framework in the Unity app, using LiveLink MCP as the default first-party capability server and allowing users to attach additional downstream MCP servers for the embedded agent.
