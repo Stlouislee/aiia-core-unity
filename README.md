@@ -1,10 +1,10 @@
 # Aroaro LiveLink for Unity
 
-A lightweight Unity package that establishes a bidirectional WebSocket bridge between a running Unity scene and external applications (Python, Node.js, Web Dashboards). Now also speaks MCP (Model Context Protocol) via JSON-RPC so LLM clients can list/read scene resources and call Unity tools.
+LiveLink is a dedicated Unity package designed to bring advanced, extensible AI capabilities into your game scenes. Built upon the robust foundation of the Microsoft Agent Framework, LiveLink acts as both a runtime environment for AI entities and a direct communications bridge to the Unity engine's internal data.
 
 ## Features
 
-- 🔌 **Drop-and-Play**: Add a single `LiveLinkManager` component to your scene
+- 🔌 **Drop-and-Play**: Add a `LiveLinkManager` component to your scene
 - 🎯 **Configurable Scope**: Sync the entire hierarchy or just a specific branch
 - 📡 **Bidirectional Communication**: Read scene state and send commands from external apps
 - ⚡ **Delta Sync**: Efficient updates that only transmit changed objects
@@ -13,8 +13,6 @@ A lightweight Unity package that establishes a bidirectional WebSocket bridge be
 - 🤝 **MCP Support**: JSON-RPC endpoint exposing scene resources and Unity tools
 
 ## Understanding LiveLink in Unity App
-
-LiveLink is a dedicated Unity package designed to bring advanced, extensible AI capabilities into your game scenes. Built upon the robust foundation of the Microsoft Agent Framework, LiveLink acts as both a runtime environment for AI entities and a direct communications bridge to the Unity engine's internal data.
 
 Here is a breakdown of the core components and capabilities as illustrated in the architecture diagram below:
 
@@ -36,44 +34,63 @@ Here is a breakdown of the core components and capabilities as illustrated in th
 
 ```mermaid
 flowchart LR
-    subgraph UnityScene [Unity Scene]
+    %% External Entities
+    subgraph External [External Environment]
         direction TB
+        ExtAgent[External AI Agent]
+        ExtTool[External Tool]
+    end
+
+    %% Unity Environment
+    subgraph UnityScene [Unity Scene]
+        direction LR
 
         subgraph LiveLink [LiveLink Package]
             direction TB
+            
             subgraph MCPServer [LiveLink MCP Server]
                 SceneRelated[Scene Related APIs]
             end
-
+            
             subgraph AgentRuntime [Agent Runtime]
+                direction TB
                 Agent1[Agent 1 <br> e.g., Chat/QA]
                 Agent2[Agent 2 <br> e.g., Workflow]
                 Agent3[Agent n]
             end
-
+            
             AgentRuntime -->|Calls / Queries| SceneRelated
         end
 
-        GameObjects[GameObjects]
-        Datacore[e.g., Datacore]
+        subgraph SceneData [Scene Elements]
+            direction TB
+            GameObjects[GameObjects]
+            Datacore[e.g., Datacore]
+        end
 
+        %% Internal Scene Connections
         SceneRelated -->|Reads / Manipulates| GameObjects
         SceneRelated -->|Bridges to| Datacore
     end
 
-    ExtAgent[External AI Agent]
-    ExtTool[External Tool]
-
+    %% Cross-boundary connections
     ExtAgent -->|Connects to| SceneRelated
-    ExtTool -->|Interfaces with| Agent2
-
-    classDef runtime fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
-    classDef mcp fill:#fce4ec,stroke:#e91e63,stroke-width:2px;
-    classDef livelink fill:#f5f5f5,stroke:#333,stroke-width:2px;
-
+    ExtTool <-->|Call/Queries| Agent2
+    
+    %% Styling and Themes
+    classDef runtime fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000;
+    classDef mcp fill:#fce4ec,stroke:#e91e63,stroke-width:2px,color:#000;
+    classDef livelink fill:#f5f5f5,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5,color:#000;
+    classDef unity fill:#e0f7fa,stroke:#00bcd4,stroke-width:2px,color:#000;
+    classDef external fill:#ede7f6,stroke:#673ab7,stroke-width:2px,color:#000;
+    classDef elements fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#000;
+    
     class AgentRuntime runtime;
     class MCPServer mcp;
     class LiveLink livelink;
+    class UnityScene unity;
+    class External external;
+    class SceneData elements;
 ```
 
 ## Additional Documentation
