@@ -1,6 +1,6 @@
 {
   "name": "com.livelink.core",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "displayName": "Unity LiveLink",
   "description": "A lightweight Unity package that establishes a bidirectional WebSocket bridge between a running Unity scene and external applications (Python, Node.js, Web Dashboards).",
   "unity": "2020.3",
