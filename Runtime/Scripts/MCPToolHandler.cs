@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using LiveLink.Network;
+using LiveLink.Tools;
 using UnityEngine;
 #if LIVELINK_GLTFAST
 using GLTFast;
@@ -15,11 +17,40 @@ namespace LiveLink
     /// </summary>
     public class MCPToolHandler
     {
+        private static readonly string[] LegacyToolNames =
+        {
+            "spawn_object",
+            "transform_object",
+            "delete_object",
+            "rename_object",
+            "set_parent",
+            "set_active",
+            "scene_dump",
+            "list_spawnable_objects",
+            "read_scene_info",
+            "read_scene_hierarchy",
+            "read_object",
+            "read_object_components",
+            "read_component_snapshot",
+            "read_selection",
+            "read_recent_events",
+            "get_view_context",
+            "spawn_gltf"
+        };
+
         private readonly LiveLinkManager _manager;
+        private readonly LiveLinkToolRegistry _dynamicToolRegistry;
+
+        public static IReadOnlyList<string> GetLegacyToolNames()
+        {
+            return LegacyToolNames;
+        }
 
         public MCPToolHandler(LiveLinkManager manager)
         {
             _manager = manager;
+            _dynamicToolRegistry = new LiveLinkToolRegistry();
+            RebuildDynamicToolRegistry();
         }
 
         /// <summary>
@@ -356,6 +387,8 @@ namespace LiveLink
                     }
                 }
             };
+
+            AppendDynamicTools(tools);
 
             return CreateSuccessResponse(id, new { tools = tools });
         }
@@ -902,6 +935,12 @@ namespace LiveLink
                 return await HandleSpawnGltfToolAsync(request.Id, arguments);
             }
 
+            MCPResponse dynamicResponse = await TryHandleDynamicToolCallAsync(request.Id, toolName, arguments);
+            if (dynamicResponse != null)
+            {
+                return dynamicResponse;
+            }
+
             // Default: existing synchronous command execution
             CommandPacket command = MapToolToCommand(toolName, arguments);
             if (command == null)
@@ -951,6 +990,93 @@ namespace LiveLink
                 },
                 isError = true
             });
+        }
+
+        private void AppendDynamicTools(List<object> tools)
+        {
+            if (tools == null || !_manager.EnableDynamicMcpTools)
+            {
+                return;
+            }
+
+            RebuildDynamicToolRegistry();
+
+            LiveLinkToolExposurePolicy policy = _manager.BuildDynamicToolExposurePolicy();
+            LiveLinkToolConsumer consumer = LiveLinkMcpRequestContext.CurrentConsumer;
+
+            foreach (LiveLinkToolDescriptor descriptor in _dynamicToolRegistry.ToolsByName.Values.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!policy.IsToolVisible(descriptor, consumer))
+                {
+                    continue;
+                }
+
+                tools.Add(new
+                {
+                    name = descriptor.Name,
+                    description = descriptor.Description,
+                    inputSchema = descriptor.InputSchema != null ? descriptor.InputSchema : new JObject { ["type"] = "object", ["properties"] = new JObject() }
+                });
+            }
+        }
+
+        private async Task<MCPResponse> TryHandleDynamicToolCallAsync(object requestId, string toolName, JObject arguments)
+        {
+            if (!_manager.EnableDynamicMcpTools || string.IsNullOrWhiteSpace(toolName))
+            {
+                return null;
+            }
+
+            RebuildDynamicToolRegistry();
+
+            if (!_dynamicToolRegistry.TryGetTool(toolName, out LiveLinkToolDescriptor descriptor) || descriptor == null)
+            {
+                return null;
+            }
+
+            LiveLinkToolExposurePolicy policy = _manager.BuildDynamicToolExposurePolicy();
+            LiveLinkToolConsumer consumer = LiveLinkMcpRequestContext.CurrentConsumer;
+            if (!policy.IsToolVisible(descriptor, consumer))
+            {
+                return CreateErrorResponse(requestId, -32601, $"Tool not available for this MCP consumer: {toolName}");
+            }
+
+            try
+            {
+                object dynamicResult = await LiveLinkToolInvoker.InvokeAsync(descriptor, arguments);
+                JToken serialized = dynamicResult == null ? JValue.CreateNull() : JToken.FromObject(dynamicResult);
+                string dataText = serialized.Type == JTokenType.Null
+                    ? "null"
+                    : Newtonsoft.Json.JsonConvert.SerializeObject(serialized, Newtonsoft.Json.Formatting.Indented);
+
+                return CreateSuccessResponse(requestId, new
+                {
+                    content = new[]
+                    {
+                        new { type = "text", text = $"Successfully executed {toolName}: Dynamic tool invocation completed." },
+                        new { type = "text", text = $"Data: {dataText}" }
+                    },
+                    isError = false
+                });
+            }
+            catch (Exception ex)
+            {
+                return CreateSuccessResponse(requestId, new
+                {
+                    content = new[]
+                    {
+                        new { type = "text", text = $"Error executing {toolName}: {ex.Message}" }
+                    },
+                    isError = true
+                });
+            }
+        }
+
+        private void RebuildDynamicToolRegistry()
+        {
+            IReadOnlyList<string> allowList = _manager.DynamicToolAssemblyAllowList;
+            IReadOnlyList<LiveLinkToolManifestAsset> manifests = _manager.DynamicToolManifestAssets;
+            _dynamicToolRegistry.Rebuild(allowList, manifests);
         }
 
         private MCPResponse HandleReadToolRequest(object id, string toolName, JObject arguments)

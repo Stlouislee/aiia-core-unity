@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -208,11 +209,29 @@ namespace LiveLink.Agent
 #pragma warning disable OPENAI001
                 IChatClient chatClient = openAiClient.GetChatClient(_config.OpenAIModel).AsIChatClient();
 #pragma warning restore OPENAI001
+
+                ChatHistoryProvider chatHistoryProvider = null;
+                if (_config.EnablePersistentChatHistory)
+                {
+                    string historyPath = ResolveChatHistoryStoragePath(_config.ChatHistoryStorageSubdirectory);
+                    chatHistoryProvider = new FileChatHistoryProvider(
+                        historyPath,
+                        _config.ChatHistoryConversationId,
+                        _config.MaxPersistedMessages,
+                        _config.MaxHistoryFileSizeBytes);
+                }
+
                 SetStatus("Creating embedded agent...");
-                _agent = chatClient.AsAIAgent(
-                    instructions: instructions,
-                    name: string.IsNullOrWhiteSpace(_config.AgentName) ? "LiveLink Agent" : _config.AgentName,
-                    tools: tools.ToArray());
+                _agent = chatClient.AsAIAgent(new ChatClientAgentOptions
+                {
+                    Name = string.IsNullOrWhiteSpace(_config.AgentName) ? "LiveLink Agent" : _config.AgentName,
+                    ChatOptions = new ChatOptions
+                    {
+                        Instructions = instructions,
+                        Tools = tools
+                    },
+                    ChatHistoryProvider = chatHistoryProvider
+                });
 
                 if (_createSessionOnInitialize)
                 {
@@ -587,6 +606,30 @@ namespace LiveLink.Agent
             return transportMode == AgentMcpHttpTransportMode.Sse
                 ? _liveLinkManager.LocalMCPSseEndpoint
                 : _liveLinkManager.LocalMCPEndpoint;
+        }
+
+        private static string ResolveChatHistoryStoragePath(string configuredSubdirectory)
+        {
+            string basePath = Application.persistentDataPath;
+            string relativePath = string.IsNullOrWhiteSpace(configuredSubdirectory)
+                ? Path.Combine("LiveLink", "AgentHistory")
+                : configuredSubdirectory.Trim();
+
+            relativePath = relativePath.Replace('\\', '/');
+            string[] segments = relativePath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            string combined = basePath;
+            for (int i = 0; i < segments.Length; i++)
+            {
+                string segment = segments[i].Trim();
+                if (segment.Length == 0 || segment == "." || segment == "..")
+                {
+                    continue;
+                }
+
+                combined = Path.Combine(combined, segment);
+            }
+
+            return combined;
         }
 
         private AgentMcpHttpTransportMode GetEffectiveLocalTransportMode()

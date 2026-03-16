@@ -10,11 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added a public `OnToolCall` event on `EmbeddedAgentRuntime` (`UnityEvent<string, string>`) so external UI can react to tool execution with tool name and serialized arguments.
+- Added production-ready file-backed chat history persistence for `EmbeddedAgentRuntime` via `FileChatHistoryProvider`, including atomic writes, corruption fallback, and retention limits.
+- Added annotation-based dynamic MCP tool bridge support:
+  - `LiveLinkToolAttribute` / `LiveLinkToolParameterAttribute`
+  - `LiveLinkToolManifestAsset` zero-intrusion method mapping mode for third-party code
+  - dynamic tool registry and invoker (`Runtime/Scripts/Tools/*`)
+  - request-context-aware exposure (`embedded-agent` vs external MCP consumer)
+  - example annotated tools (`livelink_echo`, `livelink_create_empty_object`)
 
 ### Changed
 
 - Exposed `EmbeddedAgentRuntime` UnityEvents as public inspector fields for external UI wiring: `OnResponseReceived`, `OnError`, and `OnStatusChanged`.
 - Updated `EmbeddedAgentRuntimeEditor` to bind to the public event field names and show `OnToolCall` in the inspector.
+- Extended `AgentRuntimeConfig` and `AgentRuntimeConfigEditor` with persistent chat history controls: enable flag, conversation ID, storage subdirectory, max message retention, and max file size threshold.
+- `MCPToolHandler` now appends dynamic annotated tools to `tools/list` and can execute them via `tools/call` before legacy fallback routing.
+- `MCPHttpServer` now accepts `X-LiveLink-Consumer` and propagates request consumer context for exposure policy decisions.
+- `LiveLinkManager` and `LiveLinkManagerEditor` now include configurable dynamic tool policies (assembly allow-list, exposure toggles, mutation gates, allow/deny lists, category/tag filters).
+- `AgentMcpClientFactory` now marks local embedded-agent MCP requests with `X-LiveLink-Consumer: embedded-agent`.
 
 ### Fixed
 

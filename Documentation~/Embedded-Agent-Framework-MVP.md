@@ -126,6 +126,17 @@ LiveLink should not proxy, namespace, or re-expose third-party MCP servers.
 If a capability belongs to LiveLink, expose it in LiveLink MCP.
 If a capability belongs to another server, let the agent connect to that server directly.
 
+### 5. Annotation-based first-party extension
+
+Unity app capabilities can be added to LiveLink MCP through annotation-based dynamic tool discovery.
+
+- Developers mark static methods with `LiveLinkToolAttribute`.
+- LiveLink discovers and lists those methods as MCP tools.
+- Calls are executed through a shared invoker with argument binding and optional main-thread dispatch.
+- Exposure is policy-controlled for embedded agent and external MCP clients independently.
+
+This keeps first-party extensibility inside LiveLink MCP contracts while removing hardcoded tool bottlenecks.
+
 ## What This Means For The Current Package
 
 The package already has the foundation needed for the local default server:
@@ -139,7 +150,32 @@ The new work is not to replace that surface, but to consume it from inside the s
 
 This also means the internal command surface should continue to move toward MCP parity. If the embedded agent needs a first-party Unity capability, that capability should be added to LiveLink MCP instead of hidden behind a separate agent-only path.
 
+Dynamic annotation-based tools now provide an additional path for first-party and third-party Unity code to participate in LiveLink MCP without editing legacy switch statements.
+
 ## In-App Runtime Components
+
+### Dynamic MCP Tool Bridge
+
+Implemented under `Runtime/Scripts/Tools/`.
+
+Key pieces:
+
+- `LiveLinkToolContracts.cs`: attributes, descriptors, visibility model, exposure policy model
+- `LiveLinkToolRegistry.cs`: assembly scanning and descriptor creation
+- `LiveLinkToolInvoker.cs`: argument binding, optional main-thread invocation, async support
+- `LiveLinkMcpRequestContext.cs`: per-request consumer context (`EmbeddedAgent` vs `External`)
+
+MCP flow integration:
+
+- `MCPToolHandler.tools/list`: appends discovered tools that pass current exposure policy
+- `MCPToolHandler.tools/call`: invokes discovered tools before legacy fallback routing
+- `MCPHttpServer`: maps request header `X-LiveLink-Consumer` into context for policy decisions
+- `AgentMcpClientFactory`: local embedded-agent MCP connection sets `X-LiveLink-Consumer: embedded-agent`
+
+Policy surface:
+
+- configured in `LiveLinkManager` and `LiveLinkManagerEditor`
+- supports per-consumer exposure toggles, mutation gates, allow/deny lists, and category/tag filters
 
 ### EmbeddedAgentRuntime
 
@@ -171,6 +207,7 @@ Defines:
 - embedded agent instructions
 - local LiveLink MCP connection settings
 - whether first-party scene mutation tools are enabled
+- persistent file-based chat history settings (conversation id, storage path, limits)
 - the list of downstream MCP servers
 
 The config asset also exposes public getters so UI code can read active settings (for example selected model) without reflection.
@@ -275,6 +312,14 @@ Create it from:
 - `HTTP Transport Mode` - `StreamableHttp` is the recommended mode for the built-in LiveLink MCP server; `Sse` remains only for legacy compatibility and `AutoDetect` is acceptable when needed
 - `Connection Timeout (Seconds)` - timeout for the local MCP client connection
 - `Allow Scene Mutation Tools` - enable or disable first-party write tools
+
+### Chat history persistence fields
+
+- `Enable Persistent Chat History` - enable durable file-backed chat history
+- `Conversation ID` - logical history stream identifier used across play sessions
+- `Storage Subdirectory` - relative path under `Application.persistentDataPath`
+- `Max Persisted Messages` - cap for retained and restored messages
+- `Max File Size (Bytes)` - file-size warning threshold for operational monitoring
 
 ### Downstream MCP server fields
 

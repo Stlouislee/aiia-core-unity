@@ -49,6 +49,11 @@ Runtime/
   Scripts/
     LiveLinkManager.cs
     MCPToolHandler.cs
+    Tools/
+      LiveLinkToolContracts.cs
+      LiveLinkToolRegistry.cs
+      LiveLinkToolInvoker.cs
+      LiveLinkMcpRequestContext.cs
     MCPResourceProvider.cs
     MCPResourceMapper.cs
     MainThreadDispatcher.cs
@@ -128,15 +133,18 @@ Do **not** proxy or re-expose them through LiveLink MCP.
 - If an old asset still points local LiveLink to `Sse`, runtime code may normalize that to the modern `/mcp` path.
 - External MCP servers may use HTTP (`AutoDetect` / `StreamableHttp` / `Sse`) or stdio, depending on platform.
 - Stdio support is intended for the Unity Editor and desktop players.
+- Embedded chat history can be configured as file-backed persistence through `AgentRuntimeConfig` and stored under `Application.persistentDataPath`.
 - `EmbeddedAgentRuntime` exposes public UnityEvents for UI integration: `OnResponseReceived`, `OnError`, `OnStatusChanged`, and `OnToolCall(toolName, jsonParameters)`.
 
 ## When Editing MCP Tools
 
-1. Update the tool schema in `MCPToolHandler.HandleListTools()`.
-2. Update the corresponding case in `MCPToolHandler.HandleCallToolAsync()`.
-3. If Unity APIs are involved, dispatch work to the main thread.
-4. Keep the tool result/error shape MCP-compatible.
-5. Update `README.md` and, when relevant, `Documentation~/Embedded-Agent-Framework-MVP.md`.
+1. Prefer manifest-based mapping (`LiveLinkToolManifestAsset`) for third-party code that should not depend on LiveLink types.
+2. Use annotation-based tools (`LiveLinkToolAttribute`) for first-party code or tightly integrated extensions.
+3. Keep `MCPToolHandler` legacy entries only for built-in compatibility paths.
+4. If Unity APIs are involved, ensure `RequiresMainThread = true` and keep invocation on `MainThreadDispatcher`.
+5. Respect exposure policy controls from `LiveLinkManager` (agent/external toggles, mutation gates, allow/deny lists).
+6. Keep the tool result/error shape MCP-compatible.
+7. Update `README.md` and, when relevant, `Documentation~/Embedded-Agent-Framework-MVP.md`.
 
 ## When Editing Embedded Agent Behavior
 

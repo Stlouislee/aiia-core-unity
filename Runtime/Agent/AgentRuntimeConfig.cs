@@ -47,6 +47,24 @@ namespace LiveLink.Agent
         [SerializeField]
         private bool _allowSceneMutationTools = true;
 
+        [Header("Chat History Persistence")]
+        [SerializeField]
+        private bool _enablePersistentChatHistory = false;
+
+        [SerializeField]
+        private string _chatHistoryConversationId = "default";
+
+        [SerializeField]
+        private string _chatHistoryStorageSubdirectory = "LiveLink/AgentHistory";
+
+        [SerializeField]
+        [Min(10)]
+        private int _maxPersistedMessages = 200;
+
+        [SerializeField]
+        [Min(16384)]
+        private int _maxHistoryFileSizeBytes = 1048576;
+
         [Header("Downstream MCP Servers")]
         [SerializeField]
         private List<AgentExternalMcpServerConfig> _externalMcpServers = new List<AgentExternalMcpServerConfig>();
@@ -62,6 +80,11 @@ namespace LiveLink.Agent
         public AgentMcpHttpTransportMode LocalHttpTransportMode => _localHttpTransportMode;
         public float LocalConnectionTimeoutSeconds => _localConnectionTimeoutSeconds;
         public bool AllowSceneMutationTools => _allowSceneMutationTools;
+        public bool EnablePersistentChatHistory => _enablePersistentChatHistory;
+        public string ChatHistoryConversationId => _chatHistoryConversationId;
+        public string ChatHistoryStorageSubdirectory => _chatHistoryStorageSubdirectory;
+        public int MaxPersistedMessages => _maxPersistedMessages;
+        public int MaxHistoryFileSizeBytes => _maxHistoryFileSizeBytes;
         public IReadOnlyList<AgentExternalMcpServerConfig> ExternalMcpServers => _externalMcpServers;
 
         public string ResolveOpenAIApiKey()

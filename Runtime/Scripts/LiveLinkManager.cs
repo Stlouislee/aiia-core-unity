@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using Newtonsoft.Json.Linq;
 using LiveLink.Network;
+using LiveLink.Tools;
 
 namespace LiveLink
 {
@@ -68,6 +69,59 @@ namespace LiveLink
         [SerializeField]
         [Tooltip("Log incoming and outgoing messages.")]
         private bool _debugLogging = false;
+
+        [Header("Dynamic MCP Tools")]
+        [SerializeField]
+        [Tooltip("Enable annotation-based dynamic MCP tools.")]
+        private bool _enableDynamicMcpTools = true;
+
+        [SerializeField]
+        [Tooltip("Optional assembly allow list for dynamic tool discovery. Empty means all non-system assemblies.")]
+        private List<string> _dynamicToolAssemblyAllowList = new List<string>();
+
+        [SerializeField]
+        [Tooltip("Optional tool manifest assets for zero-intrusion external tool exposure.")]
+        private List<LiveLinkToolManifestAsset> _dynamicToolManifestAssets = new List<LiveLinkToolManifestAsset>();
+
+        [SerializeField]
+        [Tooltip("Expose dynamic tools to external MCP clients.")]
+        private bool _exposeDynamicToolsToExternal = true;
+
+        [SerializeField]
+        [Tooltip("Expose dynamic tools to the embedded in-app agent.")]
+        private bool _exposeDynamicToolsToEmbeddedAgent = true;
+
+        [SerializeField]
+        [Tooltip("Allow mutation-classified dynamic tools for external MCP clients.")]
+        private bool _allowDynamicMutationToolsForExternal = false;
+
+        [SerializeField]
+        [Tooltip("Allow mutation-classified dynamic tools for embedded in-app agent sessions.")]
+        private bool _allowDynamicMutationToolsForEmbeddedAgent = true;
+
+        [SerializeField]
+        [Tooltip("Optional external dynamic tool allow list. If non-empty, only listed tools are exposed.")]
+        private List<string> _dynamicExternalToolAllowList = new List<string>();
+
+        [SerializeField]
+        [Tooltip("External dynamic tool deny list.")]
+        private List<string> _dynamicExternalToolDenyList = new List<string>();
+
+        [SerializeField]
+        [Tooltip("Optional embedded-agent dynamic tool allow list. If non-empty, only listed tools are exposed.")]
+        private List<string> _dynamicAgentToolAllowList = new List<string>();
+
+        [SerializeField]
+        [Tooltip("Embedded-agent dynamic tool deny list.")]
+        private List<string> _dynamicAgentToolDenyList = new List<string>();
+
+        [SerializeField]
+        [Tooltip("Optional category allow list for dynamic tools.")]
+        private List<string> _dynamicAllowedCategories = new List<string>();
+
+        [SerializeField]
+        [Tooltip("Optional tag allow list for dynamic tools. If set, tool must match at least one tag.")]
+        private List<string> _dynamicAllowedTags = new List<string>();
 
         #endregion
 
@@ -166,6 +220,21 @@ namespace LiveLink
         /// Gets the MCP resource provider.
         /// </summary>
         public MCPResourceProvider ResourceProvider => _resourceProvider;
+
+        /// <summary>
+        /// Gets whether dynamic annotation-based MCP tools are enabled.
+        /// </summary>
+        public bool EnableDynamicMcpTools => _enableDynamicMcpTools;
+
+        /// <summary>
+        /// Gets the optional dynamic tool discovery assembly allow list.
+        /// </summary>
+        public IReadOnlyList<string> DynamicToolAssemblyAllowList => _dynamicToolAssemblyAllowList;
+
+        /// <summary>
+        /// Gets optional manifest assets that map external methods into MCP tools.
+        /// </summary>
+        public IReadOnlyList<LiveLinkToolManifestAsset> DynamicToolManifestAssets => _dynamicToolManifestAssets;
 
         #endregion
 
@@ -1014,6 +1083,94 @@ namespace LiveLink
                 return new List<string>();
             }
             return new List<string>(_prefabLookup.Keys);
+        }
+
+        public List<string> GetInspectorMcpToolList()
+        {
+            var lines = new List<string>();
+
+            IReadOnlyList<string> legacyToolNames = MCPToolHandler.GetLegacyToolNames();
+            for (int i = 0; i < legacyToolNames.Count; i++)
+            {
+                lines.Add(legacyToolNames[i] + " [legacy]");
+            }
+
+            if (!_enableDynamicMcpTools)
+            {
+                lines.Sort(StringComparer.OrdinalIgnoreCase);
+                return lines;
+            }
+
+            var registry = new LiveLinkToolRegistry();
+            registry.Rebuild(_dynamicToolAssemblyAllowList, _dynamicToolManifestAssets);
+
+            LiveLinkToolExposurePolicy policy = BuildDynamicToolExposurePolicy();
+            foreach (LiveLinkToolDescriptor descriptor in registry.ToolsByName.Values)
+            {
+                bool visibleToExternal = policy.IsToolVisible(descriptor, LiveLinkToolConsumer.External);
+                bool visibleToAgent = policy.IsToolVisible(descriptor, LiveLinkToolConsumer.EmbeddedAgent);
+                if (!visibleToExternal && !visibleToAgent)
+                {
+                    continue;
+                }
+
+                string scope;
+                if (visibleToExternal && visibleToAgent)
+                {
+                    scope = "agent+external";
+                }
+                else if (visibleToAgent)
+                {
+                    scope = "agent";
+                }
+                else
+                {
+                    scope = "external";
+                }
+
+                lines.Add(descriptor.Name + " [dynamic:" + scope + "]");
+            }
+
+            lines.Sort(StringComparer.OrdinalIgnoreCase);
+            return lines;
+        }
+
+        internal LiveLinkToolExposurePolicy BuildDynamicToolExposurePolicy()
+        {
+            var policy = new LiveLinkToolExposurePolicy
+            {
+                EnableDynamicTools = _enableDynamicMcpTools,
+                ExposeToExternal = _exposeDynamicToolsToExternal,
+                ExposeToEmbeddedAgent = _exposeDynamicToolsToEmbeddedAgent,
+                AllowExternalMutationTools = _allowDynamicMutationToolsForExternal,
+                AllowEmbeddedAgentMutationTools = _allowDynamicMutationToolsForEmbeddedAgent
+            };
+
+            AddRange(policy.ExternalAllowList, _dynamicExternalToolAllowList);
+            AddRange(policy.ExternalDenyList, _dynamicExternalToolDenyList);
+            AddRange(policy.AgentAllowList, _dynamicAgentToolAllowList);
+            AddRange(policy.AgentDenyList, _dynamicAgentToolDenyList);
+            AddRange(policy.AllowedCategories, _dynamicAllowedCategories);
+            AddRange(policy.AllowedTags, _dynamicAllowedTags);
+
+            return policy;
+        }
+
+        private static void AddRange(HashSet<string> target, List<string> source)
+        {
+            if (target == null || source == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < source.Count; i++)
+            {
+                string value = source[i];
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    target.Add(value.Trim());
+                }
+            }
         }
 
         #endregion

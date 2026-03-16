@@ -15,6 +15,7 @@ A lightweight Unity package that establishes a bidirectional WebSocket bridge be
 ## Additional Documentation
 
 - [Embedded Agent Framework MVP](Documentation~/Embedded-Agent-Framework-MVP.md) - architecture for embedding Microsoft Agent Framework in the Unity app, using LiveLink MCP as the default first-party capability server and allowing users to attach additional downstream MCP servers for the embedded agent.
+- [External Tool Bridge Guide](Documentation~/External-Tool-Bridge-Guide.md) - how third-party developers expose tools with zero source-code intrusion via manifest mapping.
 
 ## Embedded Agent Runtime
 
@@ -26,6 +27,62 @@ The package now includes an embedded Microsoft Agent Framework runtime for singl
 - LiveLink MCP remains the default first-party server for the embedded agent.
 - Downstream MCP servers are configured for the agent only and are not bridged back through LiveLink MCP.
 - Stdio-based downstream MCP servers are intended for the Unity Editor and standalone desktop players.
+
+## Dynamic Tool Bridge (Annotation Based)
+
+LiveLink MCP now supports dynamic tool discovery from annotated C# methods, so Unity app code (including third-party code) can be exposed as MCP tools without editing `MCPToolHandler` switch tables.
+
+### How Discovery Works
+
+- Mark static methods with `LiveLinkToolAttribute`.
+- Optional `LiveLinkToolParameterAttribute` can override argument names and descriptions.
+- LiveLink scans runtime assemblies and registers discovered tools.
+- `tools/list` and `tools/call` route through dynamic registry first, then fallback to legacy built-ins.
+
+### Zero-Intrusion Manifest Mode
+
+If a third-party package should not depend on `LiveLink.Tools`, use manifest mapping:
+
+- Create one or more `LiveLinkToolManifest` assets.
+- For each entry, provide `Assembly Name`, `Type Name`, and static `Method Name`.
+- Add those assets to `LiveLinkManager > Dynamic MCP Tools > Tool Manifest Assets`.
+- LiveLink resolves and exposes methods as MCP tools without changing third-party source code.
+
+Manifest mode and attribute mode can be used together.
+
+### Example
+
+```csharp
+using LiveLink.Tools;
+
+public static class MyGameplayTools
+{
+  [LiveLinkTool(
+    "my_gameplay_ping",
+    Description = "Simple diagnostics tool",
+    Visibility = LiveLinkToolVisibility.Both,
+    RequiresMainThread = false,
+    IsMutation = false,
+    Category = "utility",
+    Tags = new[] { "diagnostic" })]
+  public static object Ping([LiveLinkToolParameter("text", Required = true)] string text)
+  {
+    return new { echoed = text };
+  }
+}
+```
+
+### Exposure Policy
+
+Use `LiveLinkManager > Dynamic MCP Tools` to configure:
+
+- discovery assembly allow-list
+- separate exposure toggles for embedded agent and external MCP clients
+- separate mutation-tool toggles for embedded agent and external MCP clients
+- allow/deny lists for agent and external clients
+- optional category/tag filters
+
+The embedded agent local MCP client now sends `X-LiveLink-Consumer: embedded-agent`, allowing server-side policy to distinguish embedded-agent calls from external calls.
 
 ## Installation
 
@@ -64,6 +121,7 @@ The Agent Framework and MCP client dependencies are vendored inside `Runtime/Plu
 | **MCP Port** | MCP HTTP server port (default: 8081) |
 | **Enable MCP Server** | Enable the MCP HTTP server on `/mcp` with legacy `/sse` compatibility |
 | **Auto Start** | Start server automatically on Play |
+| **Enable Dynamic MCP Tools** | Discover and expose tools from annotated methods |
 | **Scope** | `WholeScene` or `TargetObjectOnly` |
 | **Target Root** | Root object when using TargetObjectOnly scope |
 | **Sync Frequency** | Updates per second (0 = manual only) |
@@ -95,6 +153,11 @@ Typical MVP setup:
 - `HTTP Transport Mode`: `StreamableHttp`
 - `Connection Timeout`: `15`
 - `Allow Scene Mutation Tools`: enabled for editing flows, disabled for read-only QA
+- `Enable Persistent Chat History`: enabled when you want durable local conversation memory
+- `Conversation ID`: `default` (or app/user-specific value if you need separate history streams)
+- `Storage Subdirectory`: `LiveLink/AgentHistory`
+- `Max Persisted Messages`: `200`
+- `Max File Size (Bytes)`: `1048576`
 
 Example downstream HTTP MCP server:
 
@@ -125,6 +188,11 @@ Field guide:
 - `Enable Local LiveLink MCP` keeps your first-party Unity MCP surface available to the embedded agent.
 - `HTTP Transport Mode` for the built-in LiveLink MCP should normally stay on `StreamableHttp`; legacy `Sse` is only for backward compatibility.
 - `Allow Scene Mutation Tools` gates write operations such as spawn, transform, delete, rename, reparent, and active-state changes.
+- `Enable Persistent Chat History` stores chat history to local files under `Application.persistentDataPath`.
+- `Conversation ID` selects which persisted history stream is resumed across restarts.
+- `Storage Subdirectory` controls the relative location under `Application.persistentDataPath`.
+- `Max Persisted Messages` caps restored history and trims oldest entries first.
+- `Max File Size (Bytes)` sets a warning threshold to detect oversized history files.
 - `Use Tool Allow List` on an external server lets you expose only selected tools from that server to the agent.
 
 ### 6. External UI Event Hooks

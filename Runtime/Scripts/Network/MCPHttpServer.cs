@@ -10,6 +10,7 @@ using UnityEngine;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using LiveLink.Network;
+using LiveLink.Tools;
 
 namespace LiveLink
 {
@@ -162,7 +163,7 @@ namespace LiveLink
                 // CORS headers
                 response.AddHeader("Access-Control-Allow-Origin", "*");
                 response.AddHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-                response.AddHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Origin, MCP-Protocol-Version, MCP-Session-Id, Last-Event-ID");
+                response.AddHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Origin, MCP-Protocol-Version, MCP-Session-Id, Last-Event-ID, X-LiveLink-Consumer");
 
                 if (!IsAllowedOrigin(request))
                 {
@@ -289,6 +290,7 @@ namespace LiveLink
 
                 // Session validation based on method
                 string method = mcpRequest.Method;
+                LiveLinkToolConsumer consumer = ParseConsumer(request);
                 bool usesLegacySseSession = !string.IsNullOrEmpty(sessionId);
                 bool requiresSession = usesLegacySseSession && method != "initialize";
                 bool requiresInitialized = usesLegacySseSession && method != "initialize" && method != "notifications/initialized";
@@ -331,7 +333,11 @@ namespace LiveLink
                 {
                     try
                     {
-                        mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
+                        using (LiveLinkMcpRequestContext.PushConsumer(consumer))
+                        {
+                            mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
+                        }
+
                         MarkSessionInitializedIfNeeded(method, mcpRequest, mcpResponse, session, sessionId);
                     }
                     catch (Exception ex)
@@ -351,7 +357,7 @@ namespace LiveLink
 
                     MainThreadDispatcher.Enqueue(() =>
                     {
-                        _ = ProcessRequestOnMainThreadAsync(method, mcpRequest, session, sessionId, tcs);
+                        _ = ProcessRequestOnMainThreadAsync(method, mcpRequest, session, sessionId, consumer, tcs);
                     });
 
                     mcpResponse = await tcs.Task;
@@ -594,11 +600,16 @@ namespace LiveLink
             }
         }
 
-        private async Task ProcessRequestOnMainThreadAsync(string method, MCPRequest mcpRequest, MCPSession session, string sessionId, TaskCompletionSource<MCPResponse> tcs)
+        private async Task ProcessRequestOnMainThreadAsync(string method, MCPRequest mcpRequest, MCPSession session, string sessionId, LiveLinkToolConsumer consumer, TaskCompletionSource<MCPResponse> tcs)
         {
             try
             {
-                MCPResponse mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
+                MCPResponse mcpResponse;
+                using (LiveLinkMcpRequestContext.PushConsumer(consumer))
+                {
+                    mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
+                }
+
                 MarkSessionInitializedIfNeeded(method, mcpRequest, mcpResponse, session, sessionId);
                 tcs.TrySetResult(mcpResponse);
             }
@@ -642,6 +653,22 @@ namespace LiveLink
 
             string authority = requestUrl.GetLeftPart(UriPartial.Authority);
             return $"{authority}/mcp?sessionId={sessionId}";
+        }
+
+        private static LiveLinkToolConsumer ParseConsumer(HttpListenerRequest request)
+        {
+            if (request == null)
+            {
+                return LiveLinkToolConsumer.External;
+            }
+
+            string consumerHeader = request.Headers["X-LiveLink-Consumer"];
+            if (string.Equals(consumerHeader, "embedded-agent", StringComparison.OrdinalIgnoreCase))
+            {
+                return LiveLinkToolConsumer.EmbeddedAgent;
+            }
+
+            return LiveLinkToolConsumer.External;
         }
 
         public void Dispose()

@@ -90,13 +90,19 @@ namespace LiveLink.Agent
                 transportMode,
                 Math.Max(1f, timeoutSeconds)));
 
+            Dictionary<string, string> additionalHeaders = ToDictionary(headers);
+            if (string.Equals(displayName, "LiveLink MCP", StringComparison.OrdinalIgnoreCase))
+            {
+                additionalHeaders["X-LiveLink-Consumer"] = "embedded-agent";
+            }
+
             var transport = new HttpClientTransport(new HttpClientTransportOptions
             {
                 Name = string.IsNullOrWhiteSpace(displayName) ? "MCP HTTP" : displayName,
                 Endpoint = new Uri(endpoint),
                 TransportMode = ConvertHttpTransportMode(transportMode),
                 ConnectionTimeout = TimeSpan.FromSeconds(Math.Max(1f, timeoutSeconds)),
-                AdditionalHeaders = ToDictionary(headers)
+                AdditionalHeaders = additionalHeaders
             });
 
             return McpClient.CreateAsync(transport, cancellationToken: cancellationToken);

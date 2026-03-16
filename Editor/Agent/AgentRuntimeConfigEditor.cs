@@ -34,6 +34,11 @@ namespace LiveLink.Agent.Editor
         private SerializedProperty _localHttpTransportMode;
         private SerializedProperty _localConnectionTimeoutSeconds;
         private SerializedProperty _allowSceneMutationTools;
+        private SerializedProperty _enablePersistentChatHistory;
+        private SerializedProperty _chatHistoryConversationId;
+        private SerializedProperty _chatHistoryStorageSubdirectory;
+        private SerializedProperty _maxPersistedMessages;
+        private SerializedProperty _maxHistoryFileSizeBytes;
         private SerializedProperty _externalMcpServers;
 
         private void OnEnable()
@@ -49,6 +54,11 @@ namespace LiveLink.Agent.Editor
             _localHttpTransportMode = serializedObject.FindProperty("_localHttpTransportMode");
             _localConnectionTimeoutSeconds = serializedObject.FindProperty("_localConnectionTimeoutSeconds");
             _allowSceneMutationTools = serializedObject.FindProperty("_allowSceneMutationTools");
+            _enablePersistentChatHistory = serializedObject.FindProperty("_enablePersistentChatHistory");
+            _chatHistoryConversationId = serializedObject.FindProperty("_chatHistoryConversationId");
+            _chatHistoryStorageSubdirectory = serializedObject.FindProperty("_chatHistoryStorageSubdirectory");
+            _maxPersistedMessages = serializedObject.FindProperty("_maxPersistedMessages");
+            _maxHistoryFileSizeBytes = serializedObject.FindProperty("_maxHistoryFileSizeBytes");
             _externalMcpServers = serializedObject.FindProperty("_externalMcpServers");
         }
 
@@ -61,6 +71,8 @@ namespace LiveLink.Agent.Editor
             DrawAgentBehaviorSection();
             EditorGUILayout.Space(8);
             DrawLocalLiveLinkSection();
+            EditorGUILayout.Space(8);
+            DrawChatHistoryPersistenceSection();
             EditorGUILayout.Space(8);
             DrawExternalServersSection();
 
@@ -115,6 +127,32 @@ namespace LiveLink.Agent.Editor
                         MessageType.Warning);
                 }
             }
+        }
+
+        private void DrawChatHistoryPersistenceSection()
+        {
+            EditorGUILayout.LabelField("Chat History Persistence", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(_enablePersistentChatHistory, new GUIContent("Enable Persistent Chat History"));
+
+            if (!_enablePersistentChatHistory.boolValue)
+            {
+                EditorGUILayout.HelpBox(
+                    "When disabled, chat history only lives in memory for the current play session.",
+                    MessageType.Info);
+                return;
+            }
+
+            EditorGUI.indentLevel++;
+            EditorGUILayout.PropertyField(_chatHistoryConversationId, new GUIContent("Conversation ID"));
+            EditorGUILayout.PropertyField(_chatHistoryStorageSubdirectory, new GUIContent("Storage Subdirectory"));
+            EditorGUILayout.PropertyField(_maxPersistedMessages, new GUIContent("Max Persisted Messages"));
+            EditorGUILayout.PropertyField(_maxHistoryFileSizeBytes, new GUIContent("Max File Size (Bytes)"));
+            EditorGUI.indentLevel--;
+
+            EditorGUILayout.HelpBox(
+                "History is stored as local files under Application.persistentDataPath. " +
+                "Conversation ID controls which history stream is resumed across restarts.",
+                MessageType.None);
         }
 
         private void DrawExternalServersSection()
