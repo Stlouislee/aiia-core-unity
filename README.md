@@ -1,16 +1,169 @@
 # Aroaro LiveLink for Unity
 
-A lightweight Unity package that establishes a bidirectional WebSocket bridge between a running Unity scene and external applications (Python, Node.js, Web Dashboards). Now also speaks MCP (Model Context Protocol) via JSON-RPC so LLM clients can list/read scene resources and call Unity tools.
+LiveLink is a dedicated Unity package designed to bring advanced, extensible AI capabilities into your game scenes. Built upon the robust foundation of the Microsoft Agent Framework, LiveLink acts as both a runtime environment for AI entities and a direct communications bridge to the Unity engine's internal data.
 
 ## Features
 
-- 🔌 **Drop-and-Play**: Add a single `LiveLinkManager` component to your scene
+- 🔌 **Drop-and-Play**: Add a `LiveLinkManager` component to your scene
 - 🎯 **Configurable Scope**: Sync the entire hierarchy or just a specific branch
 - 📡 **Bidirectional Communication**: Read scene state and send commands from external apps
 - ⚡ **Delta Sync**: Efficient updates that only transmit changed objects
 - 🔧 **Prefab Spawning**: Spawn registered prefabs from external commands
 - 🖥️ **Custom Editor**: Easy-to-use inspector with status display and controls
 - 🤝 **MCP Support**: JSON-RPC endpoint exposing scene resources and Unity tools
+
+## Understanding LiveLink in Unity App
+
+Here is a breakdown of the core components and capabilities as illustrated in the architecture diagram below:
+
+**Agent Runtime Environment:** LiveLink provides a specialized runtime (managed by the Microsoft Agent Framework) within the Unity Scene. This environment hosts multiple AI agents, supporting multi-agent collaboration or individual specialization. Examples include:
+
+- **Chat/QA Agents:** For interactive dialogue and querying.
+- **Workflow Agents:** For managing multi-step tasks or scene processes.
+- **Extensible Agents:** A modular system allows you to build custom agents tailored to specific game logic or even interface with External Tools/Editor Extensions for configuration and direct control.
+
+**LiveLink MCP Server (Scene-Related APIs):** This is the heart of the package's integration with Unity. The MCP (Model Context Protocol) Server serves as a single interface for agents to interact with the scene. It provides distinct APIs that agents can call to:
+
+- **List and Query Scene Objects:** Retrieve the current state of GameObjects.
+- **Manipulate Properties:** Change GameObject states (position, rotation, etc.) or execute component methods.
+- **Broadcast Events and Bridge Methods:** Connect AI-driven decisions to native Unity events or trigger game functions.
+
+**External Integration & High-Speed Links:** LiveLink is designed for flexibility. It can operate locally within the Unity Scene or interface with an External AI Core (off-device) over high-speed data links for complex reasoning or data access. This allows external, powerful models to control the internal Unity scene seamlessly through the MCP Server interface.
+
+### Architecture Diagram
+
+```mermaid
+flowchart LR
+    %% External Entities
+    subgraph External [External Environment]
+        direction TB
+        ExtAgent[External AI Agent]
+        ExtTool[External Tool]
+    end
+
+    %% Unity Environment
+    subgraph UnityScene [Unity Scene]
+        direction LR
+
+        subgraph LiveLink [LiveLink Package]
+            direction TB
+            
+            subgraph MCPServer [LiveLink MCP Server]
+                SceneRelated[Scene Related APIs]
+            end
+            
+            subgraph AgentRuntime [Agent Runtime]
+                direction TB
+                Agent1[Agent 1 <br> e.g., Chat/QA]
+                Agent2[Agent 2 <br> e.g., Workflow]
+                Agent3[Agent n]
+            end
+            
+            AgentRuntime -->|Calls / Queries| SceneRelated
+        end
+
+        subgraph SceneData [Scene Elements]
+            direction TB
+            GameObjects[GameObjects]
+            Datacore[e.g., Datacore]
+        end
+
+        %% Internal Scene Connections
+        SceneRelated -->|Reads / Manipulates| GameObjects
+        SceneRelated -->|Bridges to| Datacore
+    end
+
+    %% Cross-boundary connections
+    ExtAgent -->|Connects to| SceneRelated
+    ExtTool <-->|Call/Queries| Agent2
+    
+    %% Styling and Themes
+    classDef runtime fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000;
+    classDef mcp fill:#fce4ec,stroke:#e91e63,stroke-width:2px,color:#000;
+    classDef livelink fill:#f5f5f5,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5,color:#000;
+    classDef unity fill:#e0f7fa,stroke:#00bcd4,stroke-width:2px,color:#000;
+    classDef external fill:#ede7f6,stroke:#673ab7,stroke-width:2px,color:#000;
+    classDef elements fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#000;
+    
+    class AgentRuntime runtime;
+    class MCPServer mcp;
+    class LiveLink livelink;
+    class UnityScene unity;
+    class External external;
+    class SceneData elements;
+```
+
+## Additional Documentation
+
+- [Embedded Agent Framework MVP](Documentation~/Embedded-Agent-Framework-MVP.md) - architecture for embedding Microsoft Agent Framework in the Unity app, using LiveLink MCP as the default first-party capability server and allowing users to attach additional downstream MCP servers for the embedded agent.
+- [External Tool Bridge Guide](Documentation~/External-Tool-Bridge-Guide.md) - how third-party developers expose tools with zero source-code intrusion via manifest mapping.
+
+## Embedded Agent Runtime
+
+The package now includes an embedded Microsoft Agent Framework runtime for single-app Unity deployments.
+
+- Add an `EmbeddedAgentRuntime` component when you want in-app QA and tool calling.
+- Create an `AgentRuntimeConfig` asset to configure the model, the default local LiveLink MCP connection, and any optional downstream MCP servers.
+- Use `LiveLink > Create Agent Runtime Config` to create the config asset from the Unity menu.
+- LiveLink MCP remains the default first-party server for the embedded agent.
+- Downstream MCP servers are configured for the agent only and are not bridged back through LiveLink MCP.
+- Stdio-based downstream MCP servers are intended for the Unity Editor and standalone desktop players.
+
+## Dynamic Tool Bridge (Annotation Based)
+
+LiveLink MCP now supports dynamic tool discovery from annotated C# methods, so Unity app code (including third-party code) can be exposed as MCP tools without editing `MCPToolHandler` switch tables.
+
+### How Discovery Works
+
+- Mark static methods with `LiveLinkToolAttribute`.
+- Optional `LiveLinkToolParameterAttribute` can override argument names and descriptions.
+- LiveLink scans runtime assemblies and registers discovered tools.
+- `tools/list` and `tools/call` route through dynamic registry first, then fallback to legacy built-ins.
+
+### Zero-Intrusion Manifest Mode
+
+If a third-party package should not depend on `LiveLink.Tools`, use manifest mapping:
+
+- Create one or more `LiveLinkToolManifest` assets.
+- For each entry, provide `Assembly Name`, `Type Name`, and static `Method Name`.
+- Add those assets to `LiveLinkManager > Dynamic MCP Tools > Tool Manifest Assets`.
+- LiveLink resolves and exposes methods as MCP tools without changing third-party source code.
+
+Manifest mode and attribute mode can be used together.
+
+### Example
+
+```csharp
+using LiveLink.Tools;
+
+public static class MyGameplayTools
+{
+  [LiveLinkTool(
+    "my_gameplay_ping",
+    Description = "Simple diagnostics tool",
+    Visibility = LiveLinkToolVisibility.Both,
+    RequiresMainThread = false,
+    IsMutation = false,
+    Category = "utility",
+    Tags = new[] { "diagnostic" })]
+  public static object Ping([LiveLinkToolParameter("text", Required = true)] string text)
+  {
+    return new { echoed = text };
+  }
+}
+```
+
+### Exposure Policy
+
+Use `LiveLinkManager > Dynamic MCP Tools` to configure:
+
+- discovery assembly allow-list
+- separate exposure toggles for embedded agent and external MCP clients
+- separate mutation-tool toggles for embedded agent and external MCP clients
+- allow/deny lists for agent and external clients
+- optional category/tag filters
+
+The embedded agent local MCP client now sends `X-LiveLink-Consumer: embedded-agent`, allowing server-side policy to distinguish embedded-agent calls from external calls.
 
 ## Installation
 
@@ -32,6 +185,8 @@ https://github.com/Stlouislee/aiia-core-unity.git
 1. Clone or download this repository
 2. Copy the contents into your project's `Packages/com.livelink.core/` folder
 
+The Agent Framework and MCP client dependencies are vendored inside `Runtime/Plugins/AgentFramework` and explicitly referenced by `LiveLink.AgentRuntime`, so the package can be imported without adding NuGet tooling to Unity.
+
 ## Quick Start
 
 ### 1. Add LiveLink Manager to Your Scene
@@ -45,8 +200,9 @@ https://github.com/Stlouislee/aiia-core-unity.git
 |----------|-------------|
 | **Port** | WebSocket server port (default: 8080) |
 | **MCP Port** | MCP HTTP server port (default: 8081) |
-| **Enable MCP Server** | Enable HTTP + SSE transport for MCP protocol |
+| **Enable MCP Server** | Enable the MCP HTTP server on `/mcp` with legacy `/sse` compatibility |
 | **Auto Start** | Start server automatically on Play |
+| **Enable Dynamic MCP Tools** | Discover and expose tools from annotated methods |
 | **Scope** | `WholeScene` or `TargetObjectOnly` |
 | **Target Root** | Root object when using TargetObjectOnly scope |
 | **Sync Frequency** | Updates per second (0 = manual only) |
@@ -57,18 +213,95 @@ https://github.com/Stlouislee/aiia-core-unity.git
 
 The server will start automatically (if Auto Start is enabled) and begin accepting WebSocket connections.
 
+### 4. Optional: Add the Embedded Agent
+
+- Create a config asset from `LiveLink > Create Agent Runtime Config`.
+- Add `EmbeddedAgentRuntime` to a GameObject.
+- Assign the config asset and a `LiveLinkManager`.
+- Press Play to let the runtime connect to the local LiveLink MCP server and any enabled downstream MCP servers.
+
+### 5. AgentRuntimeConfig Example
+
+Typical MVP setup:
+
+- `Agent Name`: `LiveLink Agent`
+- `OpenAI Model`: `gpt-4o-mini`
+- `Prefer Environment API Key`: enabled
+- `API Key Environment Variable`: `OPENAI_API_KEY`
+- `System Instructions`: tell the agent to inspect the Unity scene through MCP before answering
+- `Enable Local LiveLink MCP`: enabled
+- `Auto Start Local MCP`: enabled
+- `HTTP Transport Mode`: `StreamableHttp`
+- `Connection Timeout`: `15`
+- `Allow Scene Mutation Tools`: enabled for editing flows, disabled for read-only QA
+- `Enable Persistent Chat History`: enabled when you want durable local conversation memory
+- `Conversation ID`: `default` (or app/user-specific value if you need separate history streams)
+- `Storage Subdirectory`: `LiveLink/AgentHistory`
+- `Max Persisted Messages`: `200`
+- `Max File Size (Bytes)`: `1048576`
+
+Example downstream HTTP MCP server:
+
+- `Display Name`: `Docs MCP`
+- `Enabled`: enabled
+- `Transport Type`: `Http`
+- `Endpoint`: your MCP SSE or streamable HTTP endpoint
+- `HTTP Transport Mode`: `StreamableHttp`
+- `Connection Timeout`: `30`
+- `Headers`: optional auth headers such as `Authorization: Bearer ...`
+
+Example downstream stdio MCP server:
+
+- `Display Name`: `Filesystem MCP`
+- `Enabled`: enabled
+- `Transport Type`: `Stdio`
+- `Command`: the server executable
+- `Arguments`: startup arguments for that MCP server
+- `Working Directory`: optional process working directory
+- `Environment Variables`: optional process environment entries
+
+Field guide:
+
+- `Agent Name` controls the logical name seen by the agent runtime.
+- `OpenAI Model` selects the chat model used for reasoning and tool selection.
+- `Prefer Environment API Key` keeps secrets out of the asset when possible.
+- `Fallback API Key` is only used when the configured environment variable is missing.
+- `Enable Local LiveLink MCP` keeps your first-party Unity MCP surface available to the embedded agent.
+- `HTTP Transport Mode` for the built-in LiveLink MCP should normally stay on `StreamableHttp`; legacy `Sse` is only for backward compatibility.
+- `Allow Scene Mutation Tools` gates write operations such as spawn, transform, delete, rename, reparent, and active-state changes.
+- `Enable Persistent Chat History` stores chat history to local files under `Application.persistentDataPath`.
+- `Conversation ID` selects which persisted history stream is resumed across restarts.
+- `Storage Subdirectory` controls the relative location under `Application.persistentDataPath`.
+- `Max Persisted Messages` caps restored history and trims oldest entries first.
+- `Max File Size (Bytes)` sets a warning threshold to detect oversized history files.
+- `Use Tool Allow List` on an external server lets you expose only selected tools from that server to the agent.
+
+### 6. External UI Event Hooks
+
+`EmbeddedAgentRuntime` now exposes UnityEvents that can be wired directly from custom UI components:
+
+- `OnResponseReceived` (`UnityEvent<string>`) - final text response from the agent.
+- `OnError` (`UnityEvent<string>`) - initialization/request errors.
+- `OnStatusChanged` (`UnityEvent<string>`) - runtime progress such as connecting, running, and ready states.
+- `OnToolCall` (`UnityEvent<string, string>`) - tool invocation notifications (`toolName`, `jsonParameters`).
+
+These events are public on the component and visible in the inspector, so UI prefabs can subscribe without modifying package code.
+
+`AgentRuntimeConfig` already exposes public getters (for example `OpenAIModel`) so UI code can display active runtime settings.
+
 ## Communication Protocol
 
 Unity LiveLink provides two transport mechanisms for different use cases:
 
 ### Transport Comparison
 
-| Feature | **WebSocket** (Port 8080) | **HTTP+SSE** (Port 8081) |
+| Feature | **WebSocket** (Port 8080) | **MCP HTTP** (Port 8081) |
 |---------|--------------------------|--------------------------|
 | **Protocol** | Custom JSON | MCP (Model Context Protocol) |
-| **Session Management** | Implicit (connection-based) | Explicit (sessionId required) |
+| **Primary Endpoint** | `ws://localhost:8080/` | `http://localhost:8081/mcp` |
+| **Session Management** | Implicit (connection-based) | Streamable HTTP by default, legacy session-based SSE supported |
 | **Authentication** | None | Session-based validation |
-| **Bidirectional** | Yes (full duplex) | Request/Response + SSE events |
+| **Bidirectional** | Yes (full duplex) | Request/Response, optional SSE stream |
 | **Auto-reconnect** | Client handles | Client must re-establish session |
 | **Use Case** | Simple scripting, real-time sync | LLM agents, MCP-compatible tools |
 | **Initialization** | Automatic scene dump on connect | Explicit `initialize` handshake |
@@ -78,7 +311,7 @@ Unity LiveLink provides two transport mechanisms for different use cases:
 - Need low-latency bidirectional communication
 - Don't require MCP standard compliance
 
-**Choose HTTP+SSE when:**
+**Choose MCP HTTP when:**
 - Integrating with MCP-compatible LLM clients (Claude Desktop, etc.)
 - Need explicit session lifecycle control
 - Require RESTful request/response pattern
@@ -89,25 +322,26 @@ Unity LiveLink provides two transport mechanisms for different use cases:
 
 All communication uses JSON over WebSocket. Connect to `ws://localhost:8080/` (or your configured port).
 
-### MCP (Model Context Protocol) - HTTP+SSE Transport (Port 8081)
+### MCP (Model Context Protocol) - HTTP Transport (Port 8081)
 
 Unity LiveLink implements the official MCP HTTP+SSE transport specification with full session management.
 The MCP server listens on all interfaces. Use `localhost` when the client runs on the same machine, or the device IP / port forwarding when Unity is running on Android or Quest.
 
 #### Session Workflow
 
-1. **Connect to SSE endpoint** (`GET /sse`)
-   - Server creates a session and sends an `endpoint` event with `sessionId`
-   - Keep the SSE connection alive to maintain the session
-   
-2. **Send POST requests** to the endpoint URL (`POST /mcp?sessionId={sessionId}`)
-   - Include the `sessionId` query parameter in all requests
-   - First request must be `initialize` to authenticate the session
-   - Session expires after 5 minutes of inactivity
-   
-3. **Session Validation**
-   - `initialize`: Creates session state, no prior session required
-   - Other methods: Require valid, initialized session
+1. **Preferred transport: Streamable HTTP**
+   - Send MCP JSON-RPC requests directly to `POST /mcp`
+   - Start with `initialize`, then `notifications/initialized`, then normal MCP methods
+   - This is the recommended path for the embedded agent and modern MCP SDKs
+
+2. **Legacy compatibility transport: HTTP+SSE**
+   - Connect to `GET /sse`
+   - Server sends an `endpoint` event containing `POST /mcp?sessionId={sessionId}`
+   - Keep the SSE connection alive while posting requests to that session endpoint
+
+3. **Legacy session validation**
+   - `initialize`: creates session state
+   - Other methods: require a valid initialized legacy SSE session
    - Error codes: `-32001` (session required), `-32002` (not initialized)
 
 #### Available Methods
@@ -189,7 +423,7 @@ Response:
 #### Example Session Flow
 
 ```json
-**Step 1: Connect to SSE**
+**Legacy SSE Example - Step 1: Connect to SSE**
 ```
 GET http://localhost:8081/sse
 ```
@@ -284,7 +518,7 @@ POST http://localhost:8081/mcp?sessionId=a1b2c3d4...
 
 **Session Errors**
 
-- **-32001**: Session required - Connect to `/sse` first to obtain a `sessionId`
+- **-32001**: Session required - legacy SSE clients must connect to `/sse` first to obtain a `sessionId`
 - **-32002**: Session not initialized - Send `initialize` method before other operations
 - Session expires after 5 minutes of inactivity
 
@@ -400,6 +634,24 @@ Load from base64-encoded `.glb`:
 }
 ```
 **Returns:** Camera position, orientation, forward/right/up vectors, field of view, raycast hit info, and optionally visible objects.
+
+#### Read-Optimized Agent Tools
+
+These tools mirror the `unity://` resources but are easier for embedded agents to use during QA flows.
+
+- `read_scene_info` - Read the active scene summary
+- `read_scene_hierarchy` - Read the hierarchy tree with configurable depth
+- `read_object` - Read one GameObject by `uuid` or `instance_id`
+- `read_object_components` - Read the components attached to a GameObject
+- `read_component_snapshot` - Read a specific component snapshot
+- `read_selection` - Read the current Unity Editor selection
+- `read_recent_events` - Read tracked scene events
+
+#### Additional Mutation Tools
+
+- `rename_object` - Rename an existing GameObject
+- `set_parent` - Reparent a GameObject
+- `set_active` - Enable or disable a GameObject
 
 #### Planned Tools
 

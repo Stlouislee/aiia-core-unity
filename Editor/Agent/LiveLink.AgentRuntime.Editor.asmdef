@@ -1,0 +1,19 @@
+{
+    "name": "LiveLink.AgentRuntime.Editor",
+    "rootNamespace": "LiveLink.Agent.Editor",
+    "references": [
+        "LiveLink",
+        "LiveLink.AgentRuntime"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

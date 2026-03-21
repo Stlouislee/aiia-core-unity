@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Threading;
 using UnityEngine;
 
 namespace LiveLink
@@ -13,6 +14,7 @@ namespace LiveLink
         private static MainThreadDispatcher _instance;
         private static readonly ConcurrentQueue<Action> _executionQueue = new ConcurrentQueue<Action>();
         private static volatile bool _queued = false;
+        private static int _mainThreadId;
 
         /// <summary>
         /// Gets the singleton instance of the MainThreadDispatcher.
@@ -24,7 +26,7 @@ namespace LiveLink
             {
                 if (_instance == null)
                 {
-                    _instance = FindObjectOfType<MainThreadDispatcher>();
+                    _instance = FindExistingDispatcher();
                     if (_instance == null)
                     {
                         var go = new GameObject("[LiveLink] MainThreadDispatcher");
@@ -41,7 +43,23 @@ namespace LiveLink
         /// </summary>
         public static void Initialize()
         {
+            if (_mainThreadId == 0)
+            {
+                _mainThreadId = Thread.CurrentThread.ManagedThreadId;
+            }
+
             var _ = Instance;
+        }
+
+        public static bool IsMainThread => Thread.CurrentThread.ManagedThreadId == _mainThreadId;
+
+        private static MainThreadDispatcher FindExistingDispatcher()
+        {
+#if UNITY_2022_2_OR_NEWER
+            return FindAnyObjectByType<MainThreadDispatcher>();
+#else
+            return FindObjectOfType<MainThreadDispatcher>();
+#endif
         }
 
         /// <summary>
@@ -90,6 +108,7 @@ namespace LiveLink
             }
 
             _instance = this;
+            _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             DontDestroyOnLoad(gameObject);
         }
 

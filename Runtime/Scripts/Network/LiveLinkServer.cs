@@ -207,7 +207,7 @@ namespace LiveLink.Network
                     tcpClient.Close();
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 // Debug.LogError($"[LiveLink] Client error: {ex.Message}");
             }

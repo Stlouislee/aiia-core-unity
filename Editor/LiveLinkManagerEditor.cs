@@ -15,6 +15,8 @@ namespace LiveLink.Editor
         private GUIStyle _statusStyle;
         private GUIStyle _boxStyle;
         private bool _showPrefabs = true;
+        private bool _showToolList = true;
+        private readonly System.Collections.Generic.List<string> _toolListCache = new System.Collections.Generic.List<string>();
 
         private SerializedProperty _port;
         private SerializedProperty _mcpPort;
@@ -28,6 +30,19 @@ namespace LiveLink.Editor
         private SerializedProperty _deltaThreshold;
         private SerializedProperty _spawnablePrefabs;
         private SerializedProperty _debugLogging;
+        private SerializedProperty _enableDynamicMcpTools;
+        private SerializedProperty _dynamicToolAssemblyAllowList;
+        private SerializedProperty _dynamicToolManifestAssets;
+        private SerializedProperty _exposeDynamicToolsToExternal;
+        private SerializedProperty _exposeDynamicToolsToEmbeddedAgent;
+        private SerializedProperty _allowDynamicMutationToolsForExternal;
+        private SerializedProperty _allowDynamicMutationToolsForEmbeddedAgent;
+        private SerializedProperty _dynamicExternalToolAllowList;
+        private SerializedProperty _dynamicExternalToolDenyList;
+        private SerializedProperty _dynamicAgentToolAllowList;
+        private SerializedProperty _dynamicAgentToolDenyList;
+        private SerializedProperty _dynamicAllowedCategories;
+        private SerializedProperty _dynamicAllowedTags;
 
         private void OnEnable()
         {
@@ -45,6 +60,21 @@ namespace LiveLink.Editor
             _deltaThreshold = serializedObject.FindProperty("_deltaThreshold");
             _spawnablePrefabs = serializedObject.FindProperty("_spawnablePrefabs");
             _debugLogging = serializedObject.FindProperty("_debugLogging");
+            _enableDynamicMcpTools = serializedObject.FindProperty("_enableDynamicMcpTools");
+            _dynamicToolAssemblyAllowList = serializedObject.FindProperty("_dynamicToolAssemblyAllowList");
+            _dynamicToolManifestAssets = serializedObject.FindProperty("_dynamicToolManifestAssets");
+            _exposeDynamicToolsToExternal = serializedObject.FindProperty("_exposeDynamicToolsToExternal");
+            _exposeDynamicToolsToEmbeddedAgent = serializedObject.FindProperty("_exposeDynamicToolsToEmbeddedAgent");
+            _allowDynamicMutationToolsForExternal = serializedObject.FindProperty("_allowDynamicMutationToolsForExternal");
+            _allowDynamicMutationToolsForEmbeddedAgent = serializedObject.FindProperty("_allowDynamicMutationToolsForEmbeddedAgent");
+            _dynamicExternalToolAllowList = serializedObject.FindProperty("_dynamicExternalToolAllowList");
+            _dynamicExternalToolDenyList = serializedObject.FindProperty("_dynamicExternalToolDenyList");
+            _dynamicAgentToolAllowList = serializedObject.FindProperty("_dynamicAgentToolAllowList");
+            _dynamicAgentToolDenyList = serializedObject.FindProperty("_dynamicAgentToolDenyList");
+            _dynamicAllowedCategories = serializedObject.FindProperty("_dynamicAllowedCategories");
+            _dynamicAllowedTags = serializedObject.FindProperty("_dynamicAllowedTags");
+
+            RefreshToolList();
         }
 
         public override void OnInspectorGUI()
@@ -69,6 +99,12 @@ namespace LiveLink.Editor
             EditorGUILayout.Space(5);
             
             DrawSpawnablePrefabs();
+            EditorGUILayout.Space(5);
+
+            DrawDynamicToolConfiguration();
+            EditorGUILayout.Space(5);
+
+            DrawToolListSection();
             EditorGUILayout.Space(5);
             
             DrawDebugSection();
@@ -393,6 +429,98 @@ namespace LiveLink.Editor
             }
         }
 
+        private void DrawDynamicToolConfiguration()
+        {
+            EditorGUILayout.LabelField("Dynamic MCP Tools", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(_enableDynamicMcpTools, new GUIContent("Enable Dynamic MCP Tools"));
+
+            if (!_enableDynamicMcpTools.boolValue)
+            {
+                EditorGUILayout.HelpBox("Annotation-based dynamic tools are disabled.", MessageType.Info);
+                return;
+            }
+
+            EditorGUILayout.PropertyField(_dynamicToolAssemblyAllowList, new GUIContent("Assembly Allow List"), true);
+            EditorGUILayout.PropertyField(_dynamicToolManifestAssets, new GUIContent("Tool Manifest Assets"), true);
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField("Embedded Agent", EditorStyles.miniBoldLabel);
+            EditorGUILayout.PropertyField(_exposeDynamicToolsToEmbeddedAgent, new GUIContent("Expose To Embedded Agent"));
+            EditorGUILayout.PropertyField(_allowDynamicMutationToolsForEmbeddedAgent, new GUIContent("Allow Mutation Tools"));
+            EditorGUILayout.PropertyField(_dynamicAgentToolAllowList, new GUIContent("Allow List"), true);
+            EditorGUILayout.PropertyField(_dynamicAgentToolDenyList, new GUIContent("Deny List"), true);
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField("External MCP Clients", EditorStyles.miniBoldLabel);
+            EditorGUILayout.PropertyField(_exposeDynamicToolsToExternal, new GUIContent("Expose To External MCP"));
+            EditorGUILayout.PropertyField(_allowDynamicMutationToolsForExternal, new GUIContent("Allow Mutation Tools"));
+            EditorGUILayout.PropertyField(_dynamicExternalToolAllowList, new GUIContent("Allow List"), true);
+            EditorGUILayout.PropertyField(_dynamicExternalToolDenyList, new GUIContent("Deny List"), true);
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.PropertyField(_dynamicAllowedCategories, new GUIContent("Allowed Categories"), true);
+            EditorGUILayout.PropertyField(_dynamicAllowedTags, new GUIContent("Allowed Tags"), true);
+
+            EditorGUILayout.HelpBox(
+                "Dynamic tools come from methods marked with LiveLinkToolAttribute. " +
+                "Allow/Deny lists apply after visibility and mutation rules.",
+                MessageType.None);
+        }
+
+        private void DrawToolListSection()
+        {
+            EditorGUILayout.BeginVertical(_boxStyle);
+            EditorGUILayout.LabelField("Available MCP Tools", EditorStyles.boldLabel);
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("Refresh", GUILayout.Width(90)))
+            {
+                RefreshToolList();
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (_toolListCache.Count == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    "No cached tool list. Click Refresh to load current legacy and dynamic MCP tools.",
+                    MessageType.Info);
+                EditorGUILayout.EndVertical();
+                return;
+            }
+
+            _showToolList = EditorGUILayout.Foldout(_showToolList, "Tool List (" + _toolListCache.Count + ")", true);
+            if (_showToolList)
+            {
+                EditorGUI.indentLevel++;
+                for (int i = 0; i < _toolListCache.Count; i++)
+                {
+                    EditorGUILayout.LabelField("- " + _toolListCache[i]);
+                }
+                EditorGUI.indentLevel--;
+            }
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private void RefreshToolList()
+        {
+            _toolListCache.Clear();
+
+            if (_manager == null)
+            {
+                return;
+            }
+
+            System.Collections.Generic.List<string> lines = _manager.GetInspectorMcpToolList();
+            if (lines == null)
+            {
+                return;
+            }
+
+            _toolListCache.AddRange(lines);
+        }
+
         private void DrawDebugSection()
         {
             EditorGUILayout.LabelField("Debug", EditorStyles.boldLabel);
@@ -403,7 +531,7 @@ namespace LiveLink.Editor
         private static void CreateManager()
         {
             // Check if manager already exists
-            var existing = Object.FindObjectOfType<LiveLinkManager>();
+            var existing = FindExistingManager();
             if (existing != null)
             {
                 Selection.activeGameObject = existing.gameObject;
@@ -417,8 +545,17 @@ namespace LiveLink.Editor
             go.AddComponent<LiveLinkManager>();
             Selection.activeGameObject = go;
             Undo.RegisterCreatedObjectUndo(go, "Create LiveLink Manager");
-            
+
             Debug.Log("[LiveLink] Created LiveLinkManager in the scene.");
+        }
+
+        private static LiveLinkManager FindExistingManager()
+        {
+#if UNITY_2022_2_OR_NEWER
+            return Object.FindAnyObjectByType<LiveLinkManager>();
+#else
+            return Object.FindObjectOfType<LiveLinkManager>();
+#endif
         }
 
         [MenuItem("LiveLink/Documentation", false, 100)]

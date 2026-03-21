@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using LiveLink.Network;
+using LiveLink.Tools;
 using UnityEngine;
 #if LIVELINK_GLTFAST
 using GLTFast;
@@ -15,11 +17,40 @@ namespace LiveLink
     /// </summary>
     public class MCPToolHandler
     {
+        private static readonly string[] LegacyToolNames =
+        {
+            "spawn_object",
+            "transform_object",
+            "delete_object",
+            "rename_object",
+            "set_parent",
+            "set_active",
+            "scene_dump",
+            "list_spawnable_objects",
+            "read_scene_info",
+            "read_scene_hierarchy",
+            "read_object",
+            "read_object_components",
+            "read_component_snapshot",
+            "read_selection",
+            "read_recent_events",
+            "get_view_context",
+            "spawn_gltf"
+        };
+
         private readonly LiveLinkManager _manager;
+        private readonly LiveLinkToolRegistry _dynamicToolRegistry;
+
+        public static IReadOnlyList<string> GetLegacyToolNames()
+        {
+            return LegacyToolNames;
+        }
 
         public MCPToolHandler(LiveLinkManager manager)
         {
             _manager = manager;
+            _dynamicToolRegistry = new LiveLinkToolRegistry();
+            RebuildDynamicToolRegistry();
         }
 
         /// <summary>
@@ -146,7 +177,7 @@ namespace LiveLink
 
             return CreateSuccessResponse(id, new
             {
-                protocolVersion = "2024-11-05",
+                protocolVersion = "2025-11-25",
                 capabilities = serverCapabilities,
                 serverInfo = serverInfo,
                 instructions = "You can interact with Unity scene objects using the provided tools and resources."
@@ -199,6 +230,43 @@ namespace LiveLink
                     }
                 },
                 new {
+                    name = "rename_object",
+                    description = "Rename an existing object in the Unity scene.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            uuid = new { type = "string", description = "UUID of the object to rename" },
+                            name = new { type = "string", description = "The new object name" }
+                        },
+                        required = new[] { "uuid", "name" }
+                    }
+                },
+                new {
+                    name = "set_parent",
+                    description = "Reparent an object in the Unity scene.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            uuid = new { type = "string", description = "UUID of the object to move" },
+                            parent_uuid = new { type = "string", description = "UUID of the new parent. Omit or null to move to the root." },
+                            world_position_stays = new { type = "boolean", description = "Keep the world transform when reparenting (default: true)" }
+                        },
+                        required = new[] { "uuid" }
+                    }
+                },
+                new {
+                    name = "set_active",
+                    description = "Enable or disable an object in the Unity scene.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            uuid = new { type = "string", description = "UUID of the object to update" },
+                            active = new { type = "boolean", description = "Whether the object should be active" }
+                        },
+                        required = new[] { "uuid", "active" }
+                    }
+                },
+                new {
                     name = "scene_dump",
                     description = "Get a full dump of the current scene hierarchy.",
                     inputSchema = new {
@@ -214,6 +282,78 @@ namespace LiveLink
                     inputSchema = new {
                         type = "object",
                         properties = new { }
+                    }
+                },
+                new {
+                    name = "read_scene_info",
+                    description = "Read summary information about the active Unity scene.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new { }
+                    }
+                },
+                new {
+                    name = "read_scene_hierarchy",
+                    description = "Read the scene hierarchy tree with configurable depth.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            root = new { type = "string", description = "Optional slash-separated path to a hierarchy root (default: '/')" },
+                            depth = new { type = "integer", description = "Hierarchy depth to return (default: 2)" }
+                        }
+                    }
+                },
+                new {
+                    name = "read_object",
+                    description = "Read detailed metadata for a Unity object by UUID or instance ID.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            uuid = new { type = "string", description = "UUID of the object to inspect" },
+                            instance_id = new { type = "integer", description = "Unity instance ID of the object to inspect" }
+                        }
+                    }
+                },
+                new {
+                    name = "read_object_components",
+                    description = "Read the components attached to a Unity object by UUID or instance ID.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            uuid = new { type = "string", description = "UUID of the object to inspect" },
+                            instance_id = new { type = "integer", description = "Unity instance ID of the object to inspect" }
+                        }
+                    }
+                },
+                new {
+                    name = "read_component_snapshot",
+                    description = "Read a specific component snapshot by UUID or instance ID.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            uuid = new { type = "string", description = "UUID of the object that owns the component" },
+                            instance_id = new { type = "integer", description = "Unity instance ID of the object that owns the component" },
+                            component_type = new { type = "string", description = "Short or full component type name (for example MeshRenderer)" }
+                        },
+                        required = new[] { "component_type" }
+                    }
+                },
+                new {
+                    name = "read_selection",
+                    description = "Read the current Unity Editor selection.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new { }
+                    }
+                },
+                new {
+                    name = "read_recent_events",
+                    description = "Read the most recent tracked scene events.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            count = new { type = "integer", description = "Number of events to return (default: 50)" }
+                        }
                     }
                 },
                 new {
@@ -248,6 +388,8 @@ namespace LiveLink
                 }
             };
 
+            AppendDynamicTools(tools);
+
             return CreateSuccessResponse(id, new { tools = tools });
         }
 
@@ -258,6 +400,10 @@ namespace LiveLink
 
             if (string.IsNullOrEmpty(toolName))
                 return CreateErrorResponse(request.Id, -32602, "Tool name is required");
+
+            var readResponse = HandleReadToolRequest(request.Id, toolName, arguments);
+            if (readResponse != null)
+                return readResponse;
 
             // Map MCP tool call to LiveLink command
             CommandPacket command = MapToolToCommand(toolName, arguments);
@@ -741,6 +887,18 @@ namespace LiveLink
                     command.Type = "delete";
                     command.Payload = args;
                     break;
+                case "rename_object":
+                    command.Type = "rename";
+                    command.Payload = args;
+                    break;
+                case "set_parent":
+                    command.Type = "set_parent";
+                    command.Payload = args;
+                    break;
+                case "set_active":
+                    command.Type = "set_active";
+                    command.Payload = args;
+                    break;
                 case "scene_dump":
                     command.Type = "scene_dump";
                     command.Payload = args;
@@ -768,9 +926,19 @@ namespace LiveLink
             if (string.IsNullOrEmpty(toolName))
                 return CreateErrorResponse(request.Id, -32602, "Tool name is required");
 
+            var readResponse = HandleReadToolRequest(request.Id, toolName, arguments);
+            if (readResponse != null)
+                return readResponse;
+
             if (string.Equals(toolName, "spawn_gltf", StringComparison.OrdinalIgnoreCase))
             {
                 return await HandleSpawnGltfToolAsync(request.Id, arguments);
+            }
+
+            MCPResponse dynamicResponse = await TryHandleDynamicToolCallAsync(request.Id, toolName, arguments);
+            if (dynamicResponse != null)
+            {
+                return dynamicResponse;
             }
 
             // Default: existing synchronous command execution
@@ -821,6 +989,216 @@ namespace LiveLink
                     new { type = "text", text = $"Error executing {toolName}: {result.Message}" }
                 },
                 isError = true
+            });
+        }
+
+        private void AppendDynamicTools(List<object> tools)
+        {
+            if (tools == null || !_manager.EnableDynamicMcpTools)
+            {
+                return;
+            }
+
+            RebuildDynamicToolRegistry();
+
+            LiveLinkToolExposurePolicy policy = _manager.BuildDynamicToolExposurePolicy();
+            LiveLinkToolConsumer consumer = LiveLinkMcpRequestContext.CurrentConsumer;
+
+            foreach (LiveLinkToolDescriptor descriptor in _dynamicToolRegistry.ToolsByName.Values.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!policy.IsToolVisible(descriptor, consumer))
+                {
+                    continue;
+                }
+
+                tools.Add(new
+                {
+                    name = descriptor.Name,
+                    description = descriptor.Description,
+                    inputSchema = descriptor.InputSchema != null ? descriptor.InputSchema : new JObject { ["type"] = "object", ["properties"] = new JObject() }
+                });
+            }
+        }
+
+        private async Task<MCPResponse> TryHandleDynamicToolCallAsync(object requestId, string toolName, JObject arguments)
+        {
+            if (!_manager.EnableDynamicMcpTools || string.IsNullOrWhiteSpace(toolName))
+            {
+                return null;
+            }
+
+            RebuildDynamicToolRegistry();
+
+            if (!_dynamicToolRegistry.TryGetTool(toolName, out LiveLinkToolDescriptor descriptor) || descriptor == null)
+            {
+                return null;
+            }
+
+            LiveLinkToolExposurePolicy policy = _manager.BuildDynamicToolExposurePolicy();
+            LiveLinkToolConsumer consumer = LiveLinkMcpRequestContext.CurrentConsumer;
+            if (!policy.IsToolVisible(descriptor, consumer))
+            {
+                return CreateErrorResponse(requestId, -32601, $"Tool not available for this MCP consumer: {toolName}");
+            }
+
+            try
+            {
+                object dynamicResult = await LiveLinkToolInvoker.InvokeAsync(descriptor, arguments);
+                JToken serialized = dynamicResult == null ? JValue.CreateNull() : JToken.FromObject(dynamicResult);
+                string dataText = serialized.Type == JTokenType.Null
+                    ? "null"
+                    : Newtonsoft.Json.JsonConvert.SerializeObject(serialized, Newtonsoft.Json.Formatting.Indented);
+
+                return CreateSuccessResponse(requestId, new
+                {
+                    content = new[]
+                    {
+                        new { type = "text", text = $"Successfully executed {toolName}: Dynamic tool invocation completed." },
+                        new { type = "text", text = $"Data: {dataText}" }
+                    },
+                    isError = false
+                });
+            }
+            catch (Exception ex)
+            {
+                return CreateSuccessResponse(requestId, new
+                {
+                    content = new[]
+                    {
+                        new { type = "text", text = $"Error executing {toolName}: {ex.Message}" }
+                    },
+                    isError = true
+                });
+            }
+        }
+
+        private void RebuildDynamicToolRegistry()
+        {
+            IReadOnlyList<string> allowList = _manager.DynamicToolAssemblyAllowList;
+            IReadOnlyList<LiveLinkToolManifestAsset> manifests = _manager.DynamicToolManifestAssets;
+            _dynamicToolRegistry.Rebuild(allowList, manifests);
+        }
+
+        private MCPResponse HandleReadToolRequest(object id, string toolName, JObject arguments)
+        {
+            if (_manager.ResourceProvider == null)
+                return null;
+
+            object data = null;
+            string uri = null;
+            string message = null;
+
+            switch (toolName)
+            {
+                case "read_scene_info":
+                    uri = "unity://scene/active";
+                    message = "Read active scene information";
+                    break;
+                case "read_scene_hierarchy":
+                    string root = GetStringArgument(arguments, "root", "/");
+                    int depth = GetIntArgument(arguments, "depth", 2);
+                    uri = $"unity://scene/hierarchy?root={Uri.EscapeDataString(root)}&depth={depth}";
+                    message = "Read scene hierarchy";
+                    break;
+                case "read_object":
+                    return CreateReadResponseFromObjectLookup(id, arguments, false, false);
+                case "read_object_components":
+                    return CreateReadResponseFromObjectLookup(id, arguments, true, false);
+                case "read_component_snapshot":
+                    return CreateReadResponseFromObjectLookup(id, arguments, false, true);
+                case "read_selection":
+                    uri = "unity://selection";
+                    message = "Read current editor selection";
+                    break;
+                case "read_recent_events":
+                    int count = GetIntArgument(arguments, "count", 50);
+                    uri = $"unity://events/recent?count={count}";
+                    message = "Read recent scene events";
+                    break;
+                default:
+                    return null;
+            }
+
+            data = _manager.ResourceProvider.ReadResource(uri);
+            if (data == null)
+                return CreateErrorResponse(id, -32004, $"Resource not found: {uri}");
+
+            return CreateToolDataResponse(id, toolName, message, data, uri);
+        }
+
+        private MCPResponse CreateReadResponseFromObjectLookup(object id, JObject arguments, bool readComponents, bool readComponentSnapshot)
+        {
+            if (_manager.ResourceProvider == null)
+                return CreateErrorResponse(id, -32603, "Resource provider not initialized");
+
+            GameObject target = null;
+            int instanceId = GetIntArgument(arguments, "instance_id", 0);
+            string uuid = GetStringArgument(arguments, "uuid", null);
+
+            if (!string.IsNullOrEmpty(uuid))
+            {
+                target = _manager.Scanner.GetGameObjectByUUID(uuid);
+                if (target == null)
+                    return CreateErrorResponse(id, -32004, $"Object not found: {uuid}");
+                instanceId = target.GetInstanceID();
+            }
+
+            if (instanceId == 0)
+                return CreateErrorResponse(id, -32602, "Provide either 'uuid' or 'instance_id'");
+
+            string uri;
+            string message;
+            if (readComponentSnapshot)
+            {
+                string componentType = GetStringArgument(arguments, "component_type", null);
+                if (string.IsNullOrEmpty(componentType))
+                    return CreateErrorResponse(id, -32602, "component_type is required");
+
+                uri = $"unity://component/{instanceId}/{Uri.EscapeDataString(componentType)}";
+                message = "Read component snapshot";
+            }
+            else if (readComponents)
+            {
+                uri = $"unity://go/{instanceId}/components";
+                message = "Read object components";
+            }
+            else
+            {
+                uri = $"unity://go/{instanceId}";
+                message = "Read object metadata";
+            }
+
+            object data = _manager.ResourceProvider.ReadResource(uri);
+            if (data == null)
+                return CreateErrorResponse(id, -32004, $"Resource not found: {uri}");
+
+            return CreateToolDataResponse(id, readComponentSnapshot ? "read_component_snapshot" : (readComponents ? "read_object_components" : "read_object"), message, data, uri, uuid, instanceId);
+        }
+
+        private MCPResponse CreateToolDataResponse(object id, string toolName, string message, object data, string uri, string uuid = null, int? instanceId = null)
+        {
+            var responseData = new JObject
+            {
+                ["uri"] = uri,
+                ["data"] = JToken.FromObject(data)
+            };
+
+            if (!string.IsNullOrEmpty(uuid))
+                responseData["uuid"] = uuid;
+
+            if (instanceId.HasValue)
+                responseData["instance_id"] = instanceId.Value;
+
+            string dataText = Newtonsoft.Json.JsonConvert.SerializeObject(responseData, Newtonsoft.Json.Formatting.Indented);
+
+            return CreateSuccessResponse(id, new
+            {
+                content = new[]
+                {
+                    new { type = "text", text = $"Successfully executed {toolName}: {message}" },
+                    new { type = "text", text = $"Data: {dataText}" }
+                },
+                isError = false
             });
         }
 
@@ -931,7 +1309,11 @@ namespace LiveLink
                         sourceUri = new Uri("file:///memory.glb");
                     }
 
+                    // glTFast 6.x prefers the generic Load API, but the binary helper is still the
+                    // most compatible option across the Unity versions this package targets.
+#pragma warning disable CS0618
                     loadSuccess = await gltf.LoadGltfBinary(data, sourceUri);
+#pragma warning restore CS0618
                 }
 
                 if (!loadSuccess)
