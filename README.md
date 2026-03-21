@@ -442,7 +442,7 @@ POST http://localhost:8081/mcp?sessionId=a1b2c3d4...
   "id": 1,
   "method": "initialize",
   "params": {
-    "protocolVersion": "2024-11-05",
+    "protocolVersion": "2025-11-25",
     "capabilities": {},
     "clientInfo": {
       "name": "My MCP Client",
