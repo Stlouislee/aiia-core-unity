@@ -166,7 +166,7 @@ namespace LiveLink.Agent
                         "No OpenAI API key was configured. Set one on the AgentRuntimeConfig asset or provide it through the configured environment variable.");
                 }
 
-                ResolveLiveLinkManagerReference();
+                await ResolveLiveLinkManagerReferenceAsync(cancellationToken).ConfigureAwait(false);
                 _connectedServers.Clear();
                 _availableToolNames.Clear();
 
@@ -516,14 +516,30 @@ namespace LiveLink.Agent
             return builder.ToString().Trim();
         }
 
-        private void ResolveLiveLinkManagerReference()
+        private async Task ResolveLiveLinkManagerReferenceAsync(CancellationToken cancellationToken)
         {
             if (_liveLinkManager != null)
             {
                 return;
             }
 
-            _liveLinkManager = FindLiveLinkManagerInScene();
+            var tcs = new TaskCompletionSource<LiveLinkManager>(TaskCreationOptions.RunContinuationsAsynchronously);
+            DispatchToMainThread(() =>
+            {
+                try
+                {
+                    tcs.TrySetResult(FindLiveLinkManagerInScene());
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            });
+
+            using (cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken)))
+            {
+                _liveLinkManager = await tcs.Task.ConfigureAwait(false);
+            }
         }
 
         private static LiveLinkManager FindLiveLinkManagerInScene()

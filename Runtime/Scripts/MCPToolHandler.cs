@@ -50,7 +50,6 @@ namespace LiveLink
         {
             _manager = manager;
             _dynamicToolRegistry = new LiveLinkToolRegistry();
-            RebuildDynamicToolRegistry();
         }
 
         /// <summary>
