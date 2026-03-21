@@ -5,6 +5,12 @@ All notable changes to Unity LiveLink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2-beta.1] - 2026-03-21
+
+### Changed
+
+- enhance MCP connection messages
+
 ## [1.2.1] - 2026-02-14
 
 ### Fixed

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,6 +14,103 @@ using LiveLink.Network;
 
 namespace LiveLink
 {
+    internal sealed class McpHttpRequest
+    {
+        public string Method { get; }
+        public string Path { get; }
+        public Dictionary<string, string> Headers { get; }
+        public Dictionary<string, string> Query { get; }
+        public string Body { get; }
+
+        public McpHttpRequest(
+            string method,
+            string path,
+            Dictionary<string, string> headers,
+            Dictionary<string, string> query,
+            string body)
+        {
+            Method = method;
+            Path = path;
+            Headers = headers;
+            Query = query;
+            Body = body;
+        }
+    }
+
+    internal sealed class McpSseConnection : IDisposable
+    {
+        private readonly TcpClient _client;
+        private readonly NetworkStream _stream;
+        private readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1, 1);
+        private bool _isDisposed;
+
+        public bool IsConnected => _client != null && _client.Connected && !_isDisposed;
+
+        public McpSseConnection(TcpClient client, NetworkStream stream)
+        {
+            _client = client;
+            _stream = stream;
+        }
+
+        public async Task SendEventAsync(string eventType, string data)
+        {
+            await SendRawAsync($"event: {eventType}\ndata: {data}\n\n");
+        }
+
+        public async Task SendCommentAsync(string comment)
+        {
+            await SendRawAsync($": {comment}\n\n");
+        }
+
+        private async Task SendRawAsync(string payload)
+        {
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            byte[] buffer = Encoding.UTF8.GetBytes(payload);
+            await _writeLock.WaitAsync();
+            try
+            {
+                if (_isDisposed)
+                {
+                    return;
+                }
+
+                await _stream.WriteAsync(buffer, 0, buffer.Length);
+                await _stream.FlushAsync();
+            }
+            catch
+            {
+                Close();
+                throw;
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+        }
+
+        public void Close()
+        {
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            _isDisposed = true;
+
+            try { _stream?.Close(); } catch { }
+            try { _client?.Close(); } catch { }
+        }
+
+        public void Dispose()
+        {
+            Close();
+        }
+    }
+
     /// <summary>
     /// Represents an active MCP session tied to an SSE connection.
     /// </summary>
@@ -22,10 +120,10 @@ namespace LiveLink
         public DateTime CreatedAt { get; set; }
         public DateTime LastActivityAt { get; set; }
         public bool IsInitialized { get; set; }
-        public HttpListenerResponse SseConnection { get; set; }
+        public McpSseConnection SseConnection { get; set; }
         public JObject ClientInfo { get; set; }
 
-        public MCPSession(string sessionId, HttpListenerResponse sseConnection)
+        public MCPSession(string sessionId, McpSseConnection sseConnection)
         {
             SessionId = sessionId;
             CreatedAt = DateTime.UtcNow;
@@ -47,11 +145,13 @@ namespace LiveLink
 
     /// <summary>
     /// HTTP server for MCP (Model Context Protocol) using HTTP + SSE transport.
-    /// Implements the official MCP specification for HTTP-based communication.
+    /// Uses raw sockets instead of HttpListener so it works on IL2CPP/mobile targets.
     /// </summary>
     public class MCPHttpServer : IDisposable
     {
-        private HttpListener _listener;
+        private const int MaxHeaderBytes = 32 * 1024;
+
+        private TcpListener _listener;
         private CancellationTokenSource _cancellationTokenSource;
         private readonly MCPToolHandler _mcpHandler;
         private readonly int _port;
@@ -63,7 +163,7 @@ namespace LiveLink
 
         public bool IsRunning => _isRunning;
         public int Port => _port;
-        public int ClientCount { get { lock(_sessionsLock) { return _sessions.Count; } } }
+        public int ClientCount { get { lock (_sessionsLock) { return _sessions.Count; } } }
 
         public MCPHttpServer(MCPToolHandler mcpHandler, int port = 8081)
         {
@@ -73,13 +173,14 @@ namespace LiveLink
 
         public void Start()
         {
-            if (_isRunning) return;
+            if (_isRunning)
+            {
+                return;
+            }
 
             try
             {
-                _listener = new HttpListener();
-                _listener.Prefixes.Add($"http://localhost:{_port}/");
-                _listener.Prefixes.Add($"http://127.0.0.1:{_port}/");
+                _listener = new TcpListener(IPAddress.Any, _port);
                 _listener.Start();
                 _isRunning = true;
 
@@ -87,7 +188,7 @@ namespace LiveLink
                 Task.Run(() => AcceptClientsAsync(_cancellationTokenSource.Token));
                 Task.Run(() => SessionCleanupLoopAsync(_cancellationTokenSource.Token));
 
-                Debug.Log($"[LiveLink-MCP] HTTP server started on port {_port}");
+                Debug.Log($"[LiveLink-MCP] HTTP+SSE server started on port {_port}");
             }
             catch (Exception ex)
             {
@@ -98,20 +199,29 @@ namespace LiveLink
 
         public void Stop()
         {
-            if (!_isRunning) return;
+            if (!_isRunning)
+            {
+                return;
+            }
 
             _isRunning = false;
             _cancellationTokenSource?.Cancel();
-            
+
+            List<MCPSession> sessionsToClose;
             lock (_sessionsLock)
             {
+                sessionsToClose = _sessions.Values.ToList();
                 _sessions.Clear();
+            }
+
+            foreach (var session in sessionsToClose)
+            {
+                try { session.SseConnection?.Close(); } catch { }
             }
 
             try
             {
                 _listener?.Stop();
-                _listener?.Close();
             }
             catch (Exception ex)
             {
@@ -127,124 +237,134 @@ namespace LiveLink
             {
                 try
                 {
-                    var context = await _listener.GetContextAsync();
-                    _ = Task.Run(() => HandleRequestAsync(context), cancellationToken);
-                }
-                catch (HttpListenerException)
-                {
-                    if (_isRunning)
-                    {
-                        Debug.LogWarning("[LiveLink-MCP] HTTP listener error");
-                    }
-                    break;
+                    var client = await _listener.AcceptTcpClientAsync();
+                    _ = Task.Run(() => HandleClientAsync(client, cancellationToken));
                 }
                 catch (ObjectDisposedException)
                 {
-                    // Listener was disposed during shutdown — expected, exit silently
+                    break;
+                }
+                catch (InvalidOperationException)
+                {
                     break;
                 }
                 catch (Exception ex)
                 {
-                    if (!_isRunning) break; // Shutting down, suppress errors
+                    if (!_isRunning)
+                    {
+                        break;
+                    }
+
                     Debug.LogError($"[LiveLink-MCP] Error accepting client: {ex.Message}");
                 }
             }
         }
 
-        private async Task HandleRequestAsync(HttpListenerContext context)
+        private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
         {
-            var request = context.Request;
-            var response = context.Response;
+            bool keepConnectionOpen = false;
+            NetworkStream stream = null;
 
             try
             {
-                // CORS headers
-                response.AddHeader("Access-Control-Allow-Origin", "*");
-                response.AddHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-                response.AddHeader("Access-Control-Allow-Headers", "Content-Type");
+                client.NoDelay = true;
+                stream = client.GetStream();
 
-                // Handle OPTIONS preflight
-                if (request.HttpMethod == "OPTIONS")
+                var request = await ReadHttpRequestAsync(stream);
+                if (request == null)
                 {
-                    response.StatusCode = 204;
-                    response.Close();
                     return;
                 }
 
-                string path = request.Url.AbsolutePath;
+                if (request.Method == "OPTIONS")
+                {
+                    await WriteHttpResponseAsync(stream, 204);
+                    return;
+                }
 
-                switch (path)
+                switch (request.Path)
                 {
                     case "/mcp":
                     case "/mcp/":
-                        if (request.HttpMethod == "POST")
+                        if (request.Method == "POST")
                         {
-                            await HandleMCPRequestAsync(request, response);
+                            await HandleMCPRequestAsync(request, stream);
                         }
                         else
                         {
-                            response.StatusCode = 405; // Method Not Allowed
-                            response.Close();
+                            await WriteHttpResponseAsync(stream, 405);
                         }
                         break;
 
                     case "/sse":
                     case "/sse/":
-                        if (request.HttpMethod == "GET")
+                        if (request.Method == "GET")
                         {
-                            await HandleSSEConnectionAsync(response);
+                            await WriteSseHeadersAsync(stream);
+                            keepConnectionOpen = true;
+                            await HandleSSEConnectionAsync(new McpSseConnection(client, stream), cancellationToken);
                         }
                         else
                         {
-                            response.StatusCode = 405;
-                            response.Close();
+                            await WriteHttpResponseAsync(stream, 405);
                         }
                         break;
 
                     case "/health":
                     case "/":
-                        response.ContentType = "application/json";
-                        response.StatusCode = 200;
-                        byte[] healthData = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
-                        {
-                            status = "ok",
-                            protocol = "MCP",
-                            version = "1.0",
-                            transport = "HTTP+SSE"
-                        }));
-                        await response.OutputStream.WriteAsync(healthData, 0, healthData.Length);
-                        response.Close();
+                        await WriteHttpResponseAsync(
+                            stream,
+                            200,
+                            "application/json",
+                            JsonConvert.SerializeObject(new
+                            {
+                                status = "ok",
+                                protocol = "MCP",
+                                version = "1.0",
+                                transport = "HTTP+SSE"
+                            }));
                         break;
 
                     default:
-                        response.StatusCode = 404;
-                        response.Close();
+                        await WriteHttpResponseAsync(stream, 404);
                         break;
                 }
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[LiveLink-MCP] Error handling request: {ex.Message}");
-                try
+                if (!keepConnectionOpen && stream != null && stream.CanWrite)
                 {
-                    response.StatusCode = 500;
-                    response.Close();
+                    try
+                    {
+                        await WriteHttpResponseAsync(stream, 500);
+                    }
+                    catch { }
                 }
-                catch { }
+            }
+            finally
+            {
+                if (!keepConnectionOpen)
+                {
+                    try { stream?.Close(); } catch { }
+                    try { client?.Close(); } catch { }
+                }
             }
         }
 
-        private async Task HandleMCPRequestAsync(HttpListenerRequest request, HttpListenerResponse response)
+        private async Task HandleMCPRequestAsync(McpHttpRequest request, NetworkStream stream)
         {
+            var mcpHeaders = new Dictionary<string, string>
+            {
+                { "MCP-Protocol-Version", "2024-11-05" }
+            };
+
             try
             {
-                // Add MCP protocol version header
-                response.AddHeader("MCP-Protocol-Version", "2024-11-05");
+                string sessionId = null;
+                request.Query?.TryGetValue("sessionId", out sessionId);
 
-                // Extract and validate sessionId from query string
-                string sessionId = request.QueryString["sessionId"];
                 MCPSession session = null;
-
                 if (!string.IsNullOrEmpty(sessionId))
                 {
                     lock (_sessionsLock)
@@ -256,83 +376,78 @@ namespace LiveLink
                     }
                 }
 
-                // Read request body
-                string requestBody;
-                using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
-                {
-                    requestBody = await reader.ReadToEndAsync();
-                }
-
+                string requestBody = request.Body ?? string.Empty;
                 Debug.Log($"[LiveLink-MCP] Received request (Session: {sessionId ?? "none"}): {requestBody}");
 
-                // Parse MCP request
                 var mcpRequest = PacketSerializer.ParseMCPRequest(requestBody);
                 if (mcpRequest == null)
                 {
-                    response.StatusCode = 400;
-                    byte[] errorData = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
-                    {
-                        jsonrpc = "2.0",
-                        id = (object)null,
-                        error = new { code = -32700, message = "Parse error" }
-                    }));
-                    await response.OutputStream.WriteAsync(errorData, 0, errorData.Length);
-                    response.Close();
+                    await WriteHttpResponseAsync(
+                        stream,
+                        400,
+                        "application/json",
+                        JsonConvert.SerializeObject(new
+                        {
+                            jsonrpc = "2.0",
+                            id = (object)null,
+                            error = new { code = -32700, message = "Parse error" }
+                        }),
+                        mcpHeaders);
                     return;
                 }
 
-                // Session validation based on method
                 string method = mcpRequest.Method;
                 bool requiresSession = method != "initialize";
                 bool requiresInitialized = method != "initialize" && method != "notifications/initialized";
 
                 if (requiresSession && session == null)
                 {
-                    response.StatusCode = 401;
-                    byte[] errorData = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
-                    {
-                        jsonrpc = "2.0",
-                        id = mcpRequest.Id,
-                        error = new { code = -32001, message = "Session required. Connect to /sse first to obtain a sessionId." }
-                    }));
-                    await response.OutputStream.WriteAsync(errorData, 0, errorData.Length);
-                    response.Close();
+                    await WriteHttpResponseAsync(
+                        stream,
+                        401,
+                        "application/json",
+                        JsonConvert.SerializeObject(new
+                        {
+                            jsonrpc = "2.0",
+                            id = mcpRequest.Id,
+                            error = new { code = -32001, message = "Session required. Connect to /sse first to obtain a sessionId." }
+                        }),
+                        mcpHeaders);
                     Debug.LogWarning($"[LiveLink-MCP] Rejected request without valid session: {method}");
                     return;
                 }
 
                 if (requiresInitialized && session != null && !session.IsInitialized)
                 {
-                    response.StatusCode = 403;
-                    byte[] errorData = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
-                    {
-                        jsonrpc = "2.0",
-                        id = mcpRequest.Id,
-                        error = new { code = -32002, message = "Session not initialized. Send 'initialize' method first." }
-                    }));
-                    await response.OutputStream.WriteAsync(errorData, 0, errorData.Length);
-                    response.Close();
+                    await WriteHttpResponseAsync(
+                        stream,
+                        403,
+                        "application/json",
+                        JsonConvert.SerializeObject(new
+                        {
+                            jsonrpc = "2.0",
+                            id = mcpRequest.Id,
+                            error = new { code = -32002, message = "Session not initialized. Send 'initialize' method first." }
+                        }),
+                        mcpHeaders);
                     Debug.LogWarning($"[LiveLink-MCP] Rejected request on uninitialized session: {method}");
                     return;
                 }
 
-                // Process request on main thread
                 MCPResponse mcpResponse = null;
                 var tcs = new TaskCompletionSource<MCPResponse>();
-                
+
                 MainThreadDispatcher.Enqueue(async () =>
                 {
                     try
                     {
                         mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
-                        
-                        // Mark session as initialized after successful initialize method
+
                         if (method == "initialize" && mcpResponse != null && mcpResponse.Error == null && session != null)
                         {
                             lock (_sessionsLock)
                             {
                                 session.IsInitialized = true;
-                                // Store client info if present in params
                                 if (mcpRequest.Params != null && mcpRequest.Params["clientInfo"] != null)
                                 {
                                     session.ClientInfo = mcpRequest.Params["clientInfo"] as JObject;
@@ -340,7 +455,7 @@ namespace LiveLink
                             }
                             Debug.Log($"[LiveLink-MCP] Session {sessionId} initialized");
                         }
-                        
+
                         tcs.SetResult(mcpResponse);
                     }
                     catch (Exception ex)
@@ -356,47 +471,31 @@ namespace LiveLink
 
                 mcpResponse = await tcs.Task;
 
-                // For notifications (like initialized), no response is sent
                 if (mcpResponse == null)
                 {
-                    response.StatusCode = 204; // No Content
-                    response.Close();
+                    await WriteHttpResponseAsync(stream, 204, headers: mcpHeaders);
                     return;
                 }
 
-                // Send response
-                response.ContentType = "application/json";
-                response.StatusCode = 200;
                 string responseBody = PacketSerializer.Serialize(mcpResponse);
-                byte[] responseData = Encoding.UTF8.GetBytes(responseBody);
-                await response.OutputStream.WriteAsync(responseData, 0, responseData.Length);
-                response.Close();
-
+                await WriteHttpResponseAsync(stream, 200, "application/json", responseBody, mcpHeaders);
                 Debug.Log($"[LiveLink-MCP] Sent response: {responseBody}");
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[LiveLink-MCP] Error handling MCP request: {ex.Message}");
-                response.StatusCode = 500;
-                response.Close();
+                await WriteHttpResponseAsync(stream, 500, headers: mcpHeaders);
             }
         }
 
-        private async Task HandleSSEConnectionAsync(HttpListenerResponse response)
+        private async Task HandleSSEConnectionAsync(McpSseConnection connection, CancellationToken cancellationToken)
         {
             string sessionId = Guid.NewGuid().ToString("N");
             MCPSession session = null;
-            
+
             try
             {
-                // Set SSE headers
-                response.ContentType = "text/event-stream";
-                response.AddHeader("Cache-Control", "no-cache");
-                response.AddHeader("Connection", "keep-alive");
-                response.StatusCode = 200;
-
-                // Create and register session
-                session = new MCPSession(sessionId, response);
+                session = new MCPSession(sessionId, connection);
                 lock (_sessionsLock)
                 {
                     _sessions[sessionId] = session;
@@ -404,24 +503,20 @@ namespace LiveLink
 
                 Debug.Log($"[LiveLink-MCP] SSE client connected (Session: {sessionId})");
 
-                // Send initial endpoint event as per MCP spec
-                // The URI should be where the client sends POST requests
                 string endpointUri = $"/mcp?sessionId={sessionId}";
-                await SendSSEEventAsync(response, "endpoint", endpointUri);
+                await SendSSEEventAsync(connection, "endpoint", endpointUri);
 
-                // Keep connection alive
-                while (_isRunning)
+                while (_isRunning && !cancellationToken.IsCancellationRequested && connection.IsConnected)
                 {
-                    await Task.Delay(30000); // Send heartbeat every 30 seconds
-                    if (_isRunning)
+                    await Task.Delay(30000, cancellationToken);
+                    if (_isRunning && connection.IsConnected)
                     {
-                        // Send a comment as heartbeat to keep connection alive without triggering events
-                        string heartbeat = ": heartbeat\n\n";
-                        byte[] buffer = Encoding.UTF8.GetBytes(heartbeat);
-                        await response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
-                        await response.OutputStream.FlushAsync();
+                        await connection.SendCommentAsync("heartbeat");
                     }
                 }
+            }
+            catch (TaskCanceledException)
+            {
             }
             catch (Exception ex)
             {
@@ -429,7 +524,6 @@ namespace LiveLink
             }
             finally
             {
-                // Clean up session when SSE connection closes
                 if (session != null)
                 {
                     lock (_sessionsLock)
@@ -438,7 +532,8 @@ namespace LiveLink
                     }
                     Debug.Log($"[LiveLink-MCP] Session {sessionId} removed (SSE disconnected)");
                 }
-                try { response.Close(); } catch { }
+
+                connection.Close();
             }
         }
 
@@ -449,7 +544,7 @@ namespace LiveLink
                 try
                 {
                     await Task.Delay(_cleanupInterval, cancellationToken);
-                    
+
                     List<string> expiredSessions = new List<string>();
                     lock (_sessionsLock)
                     {
@@ -485,14 +580,11 @@ namespace LiveLink
             }
         }
 
-        private async Task SendSSEEventAsync(HttpListenerResponse response, string eventType, string data)
+        private async Task SendSSEEventAsync(McpSseConnection connection, string eventType, string data)
         {
             try
             {
-                string message = $"event: {eventType}\ndata: {data}\n\n";
-                byte[] buffer = Encoding.UTF8.GetBytes(message);
-                await response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
-                await response.OutputStream.FlushAsync();
+                await connection.SendEventAsync(eventType, data);
             }
             catch (Exception ex)
             {
@@ -522,6 +614,301 @@ namespace LiveLink
             Stop();
             _cancellationTokenSource?.Dispose();
             _listener = null;
+        }
+
+        private async Task<McpHttpRequest> ReadHttpRequestAsync(NetworkStream stream)
+        {
+            using (var headerBuffer = new MemoryStream())
+            {
+                byte[] readBuffer = new byte[4096];
+
+                while (true)
+                {
+                    int read = await stream.ReadAsync(readBuffer, 0, readBuffer.Length);
+                    if (read == 0)
+                    {
+                        if (headerBuffer.Length == 0)
+                        {
+                            return null;
+                        }
+
+                        throw new IOException("Connection closed before the HTTP request completed.");
+                    }
+
+                    headerBuffer.Write(readBuffer, 0, read);
+
+                    int headerEndIndex = FindHeaderEnd(headerBuffer.GetBuffer(), (int)headerBuffer.Length);
+                    if (headerEndIndex >= 0)
+                    {
+                        return await ParseHttpRequestAsync(stream, headerBuffer.ToArray(), headerEndIndex);
+                    }
+
+                    if (headerBuffer.Length > MaxHeaderBytes)
+                    {
+                        throw new InvalidDataException("HTTP headers exceeded the allowed limit.");
+                    }
+                }
+            }
+        }
+
+        private async Task<McpHttpRequest> ParseHttpRequestAsync(NetworkStream stream, byte[] requestBytes, int headerEndIndex)
+        {
+            string headerText = Encoding.ASCII.GetString(requestBytes, 0, headerEndIndex);
+            string[] headerLines = headerText.Split(new[] { "\r\n" }, StringSplitOptions.None);
+            if (headerLines.Length == 0)
+            {
+                throw new InvalidDataException("HTTP request line was missing.");
+            }
+
+            string[] requestLineParts = headerLines[0].Split(' ');
+            if (requestLineParts.Length < 2)
+            {
+                throw new InvalidDataException("HTTP request line was invalid.");
+            }
+
+            string method = requestLineParts[0].Trim().ToUpperInvariant();
+            string requestTarget = requestLineParts[1].Trim();
+
+            var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 1; i < headerLines.Length; i++)
+            {
+                string line = headerLines[i];
+                if (string.IsNullOrEmpty(line))
+                {
+                    continue;
+                }
+
+                int separatorIndex = line.IndexOf(':');
+                if (separatorIndex <= 0)
+                {
+                    continue;
+                }
+
+                string name = line.Substring(0, separatorIndex).Trim();
+                string value = line.Substring(separatorIndex + 1).Trim();
+                headers[name] = value;
+            }
+
+            int contentLength = 0;
+            if (headers.TryGetValue("Content-Length", out string contentLengthValue))
+            {
+                int.TryParse(contentLengthValue, out contentLength);
+            }
+
+            if (headers.TryGetValue("Transfer-Encoding", out string transferEncoding) &&
+                transferEncoding.IndexOf("chunked", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                throw new NotSupportedException("Chunked transfer encoding is not supported by this transport.");
+            }
+
+            int bodyStartIndex = headerEndIndex + 4;
+            int bufferedBodyLength = Math.Max(0, requestBytes.Length - bodyStartIndex);
+            byte[] bodyBytes = Array.Empty<byte>();
+
+            if (contentLength > 0)
+            {
+                bodyBytes = new byte[contentLength];
+                int copyLength = Math.Min(bufferedBodyLength, contentLength);
+                if (copyLength > 0)
+                {
+                    Array.Copy(requestBytes, bodyStartIndex, bodyBytes, 0, copyLength);
+                }
+
+                int totalBodyBytes = copyLength;
+                while (totalBodyBytes < contentLength)
+                {
+                    int read = await stream.ReadAsync(bodyBytes, totalBodyBytes, contentLength - totalBodyBytes);
+                    if (read == 0)
+                    {
+                        throw new IOException("Connection closed while reading the HTTP request body.");
+                    }
+
+                    totalBodyBytes += read;
+                }
+            }
+
+            Uri requestUri = CreateRequestUri(requestTarget);
+            string body = bodyBytes.Length > 0 ? Encoding.UTF8.GetString(bodyBytes) : string.Empty;
+
+            return new McpHttpRequest(
+                method,
+                requestUri.AbsolutePath,
+                headers,
+                ParseQueryString(requestUri.Query),
+                body);
+        }
+
+        private static int FindHeaderEnd(byte[] buffer, int length)
+        {
+            for (int i = 0; i <= length - 4; i++)
+            {
+                if (buffer[i] == '\r' &&
+                    buffer[i + 1] == '\n' &&
+                    buffer[i + 2] == '\r' &&
+                    buffer[i + 3] == '\n')
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private static Uri CreateRequestUri(string requestTarget)
+        {
+            if (string.IsNullOrEmpty(requestTarget) || requestTarget == "*")
+            {
+                return new Uri("http://localhost/");
+            }
+
+            if (requestTarget.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                requestTarget.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                return new Uri(requestTarget);
+            }
+
+            return new Uri($"http://localhost{requestTarget}");
+        }
+
+        private static Dictionary<string, string> ParseQueryString(string queryString)
+        {
+            var query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(queryString))
+            {
+                return query;
+            }
+
+            string trimmed = queryString.TrimStart('?');
+            if (string.IsNullOrEmpty(trimmed))
+            {
+                return query;
+            }
+
+            string[] pairs = trimmed.Split('&');
+            foreach (var pair in pairs)
+            {
+                if (string.IsNullOrEmpty(pair))
+                {
+                    continue;
+                }
+
+                int separatorIndex = pair.IndexOf('=');
+                string key;
+                string value;
+
+                if (separatorIndex >= 0)
+                {
+                    key = pair.Substring(0, separatorIndex);
+                    value = pair.Substring(separatorIndex + 1);
+                }
+                else
+                {
+                    key = pair;
+                    value = string.Empty;
+                }
+
+                if (string.IsNullOrEmpty(key))
+                {
+                    continue;
+                }
+
+                query[Uri.UnescapeDataString(key)] = Uri.UnescapeDataString(value);
+            }
+
+            return query;
+        }
+
+        private async Task WriteHttpResponseAsync(
+            NetworkStream stream,
+            int statusCode,
+            string contentType = null,
+            string body = "",
+            Dictionary<string, string> headers = null)
+        {
+            byte[] bodyBytes = string.IsNullOrEmpty(body)
+                ? Array.Empty<byte>()
+                : Encoding.UTF8.GetBytes(body);
+
+            var builder = new StringBuilder();
+            builder.Append("HTTP/1.1 ")
+                .Append(statusCode)
+                .Append(' ')
+                .Append(GetStatusDescription(statusCode))
+                .Append("\r\n");
+            builder.Append("Server: UnityLiveLinkMCP\r\n");
+            builder.Append("Access-Control-Allow-Origin: *\r\n");
+            builder.Append("Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n");
+            builder.Append("Access-Control-Allow-Headers: Content-Type\r\n");
+
+            if (!string.IsNullOrEmpty(contentType))
+            {
+                builder.Append("Content-Type: ").Append(contentType).Append("\r\n");
+            }
+
+            if (headers != null)
+            {
+                foreach (var header in headers)
+                {
+                    builder.Append(header.Key).Append(": ").Append(header.Value).Append("\r\n");
+                }
+            }
+
+            builder.Append("Content-Length: ").Append(bodyBytes.Length).Append("\r\n");
+            builder.Append("Connection: close\r\n");
+            builder.Append("\r\n");
+
+            byte[] headerBytes = Encoding.ASCII.GetBytes(builder.ToString());
+            await stream.WriteAsync(headerBytes, 0, headerBytes.Length);
+
+            if (bodyBytes.Length > 0)
+            {
+                await stream.WriteAsync(bodyBytes, 0, bodyBytes.Length);
+            }
+
+            await stream.FlushAsync();
+        }
+
+        private async Task WriteSseHeadersAsync(NetworkStream stream)
+        {
+            var builder = new StringBuilder();
+            builder.Append("HTTP/1.1 200 OK\r\n");
+            builder.Append("Server: UnityLiveLinkMCP\r\n");
+            builder.Append("Content-Type: text/event-stream\r\n");
+            builder.Append("Cache-Control: no-cache\r\n");
+            builder.Append("Connection: keep-alive\r\n");
+            builder.Append("Access-Control-Allow-Origin: *\r\n");
+            builder.Append("Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n");
+            builder.Append("Access-Control-Allow-Headers: Content-Type\r\n");
+            builder.Append("\r\n");
+
+            byte[] headerBytes = Encoding.ASCII.GetBytes(builder.ToString());
+            await stream.WriteAsync(headerBytes, 0, headerBytes.Length);
+            await stream.FlushAsync();
+        }
+
+        private static string GetStatusDescription(int statusCode)
+        {
+            switch (statusCode)
+            {
+                case 200:
+                    return "OK";
+                case 204:
+                    return "No Content";
+                case 400:
+                    return "Bad Request";
+                case 401:
+                    return "Unauthorized";
+                case 403:
+                    return "Forbidden";
+                case 404:
+                    return "Not Found";
+                case 405:
+                    return "Method Not Allowed";
+                case 500:
+                    return "Internal Server Error";
+                default:
+                    return "OK";
+            }
         }
     }
 }

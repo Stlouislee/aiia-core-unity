@@ -92,6 +92,7 @@ All communication uses JSON over WebSocket. Connect to `ws://localhost:8080/` (o
 ### MCP (Model Context Protocol) - HTTP+SSE Transport (Port 8081)
 
 Unity LiveLink implements the official MCP HTTP+SSE transport specification with full session management.
+The MCP server listens on all interfaces. Use `localhost` when the client runs on the same machine, or the device IP / port forwarding when Unity is running on Android or Quest.
 
 #### Session Workflow
 

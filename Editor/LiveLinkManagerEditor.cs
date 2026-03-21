@@ -223,7 +223,11 @@ namespace LiveLink.Editor
             if (isMCPRunning)
             {
                 EditorGUILayout.Space(5);
-                EditorGUILayout.HelpBox($"MCP Endpoint: http://localhost:{_mcpPort.intValue}/mcp\nSSE Endpoint: http://localhost:{_mcpPort.intValue}/sse", MessageType.Info);
+                EditorGUILayout.HelpBox(
+                    $"MCP Endpoint: http://localhost:{_mcpPort.intValue}/mcp\n" +
+                    $"SSE Endpoint: http://localhost:{_mcpPort.intValue}/sse\n" +
+                    "On Android/Quest builds, connect with the device IP or port forwarding instead of localhost.",
+                    MessageType.Info);
             }
             else if (!isMCPEnabled && Application.isPlaying)
             {
