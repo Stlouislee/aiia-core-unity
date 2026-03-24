@@ -5,6 +5,20 @@ All notable changes to Unity LiveLink will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Build-time dynamic tool cache pipeline:
+  - New `LiveLinkToolCacheAsset` to store pre-computed attribute-discovered MCP tools.
+  - New `LiveLinkToolCacheBuilder` editor/build hook (`LiveLink > Rebuild Tool Cache`, plus pre-build refresh).
+- `LiveLinkManager` now supports assigning a tool cache asset for dynamic MCP discovery.
+
+### Changed
+
+- Dynamic tool registry now uses pre-computed cache first and falls back to runtime reflection scanning when cache is missing or stale.
+- `LiveLinkManager` inspector now includes dynamic-tool cache controls and manifest convenience actions (create/ping).
+
 ## [1.2.2-beta.1] - 2026-03-21
 
 ### Changed

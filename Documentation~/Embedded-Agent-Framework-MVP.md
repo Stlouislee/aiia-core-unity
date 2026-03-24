@@ -152,6 +152,8 @@ This also means the internal command surface should continue to move toward MCP 
 
 Dynamic annotation-based tools now provide an additional path for first-party and third-party Unity code to participate in LiveLink MCP without editing legacy switch statements.
 
+For performance-sensitive targets (for example Android), discovery for attribute/manifest modes should be completed during editor/build workflows via a pre-computed cache asset, with runtime reflection reserved as fallback and for runtime registration mode.
+
 ## In-App Runtime Components
 
 ### Dynamic MCP Tool Bridge
@@ -162,8 +164,14 @@ Key pieces:
 
 - `LiveLinkToolContracts.cs`: attributes, descriptors, visibility model, exposure policy model
 - `LiveLinkToolRegistry.cs`: assembly scanning and descriptor creation
+- `LiveLinkToolCacheAsset.cs`: serialized build-time cache of discovered attribute tools
 - `LiveLinkToolInvoker.cs`: argument binding, optional main-thread invocation, async support
 - `LiveLinkMcpRequestContext.cs`: per-request consumer context (`EmbeddedAgent` vs `External`)
+
+Editor/build support:
+
+- `Editor/Tools/LiveLinkToolCacheBuilder.cs`: rebuilds cache in editor and on pre-build
+- `LiveLinkManagerEditor`: cache assignment/status and manifest create/ping controls
 
 MCP flow integration:
 

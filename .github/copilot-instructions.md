@@ -140,11 +140,12 @@ Do **not** proxy or re-expose them through LiveLink MCP.
 
 1. Prefer manifest-based mapping (`LiveLinkToolManifestAsset`) for third-party code that should not depend on LiveLink types.
 2. Use annotation-based tools (`LiveLinkToolAttribute`) for first-party code or tightly integrated extensions.
-3. Keep `MCPToolHandler` legacy entries only for built-in compatibility paths.
-4. If Unity APIs are involved, ensure `RequiresMainThread = true` and keep invocation on `MainThreadDispatcher`.
-5. Respect exposure policy controls from `LiveLinkManager` (agent/external toggles, mutation gates, allow/deny lists).
-6. Keep the tool result/error shape MCP-compatible.
-7. Update `README.md` and, when relevant, `Documentation~/Embedded-Agent-Framework-MVP.md`.
+3. Prefer editor/build-time discovery cache (`LiveLinkToolCacheAsset` via `LiveLinkToolCacheBuilder`) to avoid runtime reflection cost on startup-sensitive targets.
+4. Keep `MCPToolHandler` legacy entries only for built-in compatibility paths.
+5. If Unity APIs are involved, ensure `RequiresMainThread = true` and keep invocation on `MainThreadDispatcher`.
+6. Respect exposure policy controls from `LiveLinkManager` (agent/external toggles, mutation gates, allow/deny lists).
+7. Keep the tool result/error shape MCP-compatible.
+8. Update `README.md` and, when relevant, `Documentation~/Embedded-Agent-Framework-MVP.md`.
 
 ## When Editing Embedded Agent Behavior
 

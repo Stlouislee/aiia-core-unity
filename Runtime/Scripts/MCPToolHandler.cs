@@ -1075,7 +1075,8 @@ namespace LiveLink
         {
             IReadOnlyList<string> allowList = _manager.DynamicToolAssemblyAllowList;
             IReadOnlyList<LiveLinkToolManifestAsset> manifests = _manager.DynamicToolManifestAssets;
-            _dynamicToolRegistry.Rebuild(allowList, manifests);
+            LiveLinkToolCacheAsset cache = _manager.ToolCacheAsset;
+            _dynamicToolRegistry.Rebuild(allowList, manifests, cache);
         }
 
         private MCPResponse HandleReadToolRequest(object id, string toolName, JObject arguments)

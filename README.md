@@ -120,6 +120,15 @@ LiveLink MCP now supports dynamic tool discovery from annotated C# methods, so U
 - LiveLink scans runtime assemblies and registers discovered tools.
 - `tools/list` and `tools/call` route through dynamic registry first, then fallback to legacy built-ins.
 
+### Build-Time Discovery Cache
+
+To avoid startup freezes caused by runtime reflection scanning, LiveLink supports a pre-computed tool cache:
+
+- Generate cache from Unity menu: `LiveLink > Rebuild Tool Cache`.
+- Assign the generated `LiveLinkToolCache` asset in `LiveLinkManager > Dynamic MCP Tools > Tool Cache Asset`.
+- At runtime, LiveLink uses cache first and falls back to reflection only when cache is missing or stale.
+- Runtime registration mode remains dynamic and is still discovered at runtime.
+
 ### Zero-Intrusion Manifest Mode
 
 If a third-party package should not depend on `LiveLink.Tools`, use manifest mapping:
@@ -128,6 +137,12 @@ If a third-party package should not depend on `LiveLink.Tools`, use manifest map
 - For each entry, provide `Assembly Name`, `Type Name`, and static `Method Name`.
 - Add those assets to `LiveLinkManager > Dynamic MCP Tools > Tool Manifest Assets`.
 - LiveLink resolves and exposes methods as MCP tools without changing third-party source code.
+
+In `LiveLinkManager` inspector, you can now:
+
+- create a new manifest asset directly (`Create Manifest`)
+- ping/select the first configured manifest (`Ping First Manifest`)
+- manage manifest list and exposure policies in one place
 
 Manifest mode and attribute mode can be used together.
 

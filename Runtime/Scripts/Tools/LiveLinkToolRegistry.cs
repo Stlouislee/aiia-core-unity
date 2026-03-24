@@ -12,21 +12,216 @@ namespace LiveLink.Tools
         private readonly Dictionary<string, LiveLinkToolDescriptor> _toolsByName = new Dictionary<string, LiveLinkToolDescriptor>(StringComparer.OrdinalIgnoreCase);
         private readonly List<string> _duplicateTools = new List<string>();
 
-        public IReadOnlyDictionary<string, LiveLinkToolDescriptor> ToolsByName
-        {
-            get { return _toolsByName; }
-        }
+        public IReadOnlyDictionary<string, LiveLinkToolDescriptor> ToolsByName { get { return _toolsByName; } }
+        public IReadOnlyList<string> DuplicateTools { get { return _duplicateTools; } }
 
-        public IReadOnlyList<string> DuplicateTools
-        {
-            get { return _duplicateTools; }
-        }
-
-        public void Rebuild(IReadOnlyList<string> assemblyAllowList, IReadOnlyList<LiveLinkToolManifestAsset> manifestAssets = null)
+        /// <summary>
+        /// Rebuilds the tool registry. Uses cache if available and valid, otherwise falls back to reflection scanning.
+        /// </summary>
+        /// <param name="assemblyAllowList">Optional assembly allow list for reflection scanning fallback.</param>
+        /// <param name="manifestAssets">Manifest assets for zero-intrusion tool registration.</param>
+        /// <param name="cacheAsset">Optional pre-computed cache asset. If null, will try to load from Resources.</param>
+        public void Rebuild(
+            IReadOnlyList<string> assemblyAllowList,
+            IReadOnlyList<LiveLinkToolManifestAsset> manifestAssets = null,
+            LiveLinkToolCacheAsset cacheAsset = null)
         {
             _toolsByName.Clear();
             _duplicateTools.Clear();
 
+            // Try to use cache first
+            bool usedCache = false;
+            if (cacheAsset != null && !cacheAsset.IsStale)
+            {
+                usedCache = LoadFromCache(cacheAsset);
+                if (usedCache)
+                {
+                    Debug.Log($"[LiveLink-MCP] Loaded {ToolsByName.Count} tools from cache (build-time pre-computed)");
+                }
+            }
+
+            // Fallback to reflection scanning if no valid cache
+            if (!usedCache)
+            {
+#if UNITY_EDITOR
+                Debug.LogWarning("[LiveLink-MCP] No valid cache found, falling back to runtime reflection scanning. Consider rebuilding cache via LiveLink > Rebuild Tool Cache");
+#endif
+                ScanAssembliesForAttributes(assemblyAllowList);
+            }
+
+            // Always merge manifest-based tools (these are manually configured)
+            List<LiveLinkToolDescriptor> manifestDescriptors = LiveLinkToolManifestResolver.ResolveFromAssets(manifestAssets);
+            for (int i = 0; i < manifestDescriptors.Count; i++)
+            {
+                LiveLinkToolDescriptor descriptor = manifestDescriptors[i];
+                string source = descriptor.DeclaringType != null
+                    ? descriptor.DeclaringType.FullName + "." + descriptor.MethodName + " [manifest]"
+                    : "manifest";
+                AddDescriptor(descriptor, source);
+            }
+        }
+
+        /// <summary>
+        /// Loads tools from a pre-computed cache asset.
+        /// </summary>
+        /// <returns>True if cache was loaded successfully, false otherwise.</returns>
+        private bool LoadFromCache(LiveLinkToolCacheAsset cache)
+        {
+            if (cache == null || cache.Tools == null || cache.Tools.Count == 0)
+                return false;
+
+            for (int i = 0; i < cache.Tools.Count; i++)
+            {
+                LiveLinkToolCacheEntry entry = cache.Tools[i];
+                LiveLinkToolDescriptor descriptor = CreateDescriptorFromCache(entry);
+                if (descriptor != null)
+                {
+                    AddDescriptor(descriptor, "cache");
+                }
+            }
+
+            return _toolsByName.Count > 0;
+        }
+
+        /// <summary>
+        /// Creates a descriptor from a cache entry.
+        /// </summary>
+        private LiveLinkToolDescriptor CreateDescriptorFromCache(LiveLinkToolCacheEntry entry)
+        {
+            if (entry == null || string.IsNullOrEmpty(entry.ToolName))
+                return null;
+
+            // Resolve method from assembly-qualified names
+            MethodInfo method = ResolveMethodFromCache(entry);
+            if (method == null)
+            {
+                Debug.LogWarning($"[LiveLink-MCP] Could not resolve method for cached tool: {entry.ToolName} ({entry.TypeName}.{entry.MethodName})");
+                return null;
+            }
+
+            // Build parameter descriptors from cache
+            var parameters = new List<LiveLinkToolParameterDescriptor>();
+            if (entry.Parameters != null)
+            {
+                for (int i = 0; i < entry.Parameters.Count; i++)
+                {
+                    var paramCache = entry.Parameters[i];
+                    Type paramType = Type.GetType(paramCache.ParameterTypeName);
+                    if (paramType == null)
+                    {
+                        Debug.LogWarning($"[LiveLink-MCP] Could not resolve parameter type: {paramCache.ParameterTypeName}");
+                        continue;
+                    }
+
+                    object defaultValue = null;
+                    if (paramCache.HasDefaultValue && !string.IsNullOrEmpty(paramCache.DefaultValueJson))
+                    {
+                        try
+                        {
+                            defaultValue = Newtonsoft.Json.JsonConvert.DeserializeObject(paramCache.DefaultValueJson, paramType);
+                        }
+                        catch
+                        {
+                            // Ignore deserialization errors
+                        }
+                    }
+
+                    parameters.Add(new LiveLinkToolParameterDescriptor
+                    {
+                        Name = paramCache.Name,
+                        Description = paramCache.Description ?? string.Empty,
+                        ParameterType = paramType,
+                        Required = paramCache.Required,
+                        HasDefaultValue = paramCache.HasDefaultValue,
+                        DefaultValue = defaultValue,
+                        Position = paramCache.Position
+                    });
+                }
+            }
+
+            // Parse input schema
+            JObject inputSchema = null;
+            if (!string.IsNullOrEmpty(entry.InputSchemaJson))
+            {
+                try
+                {
+                    inputSchema = JObject.Parse(entry.InputSchemaJson);
+                }
+                catch
+                {
+                    inputSchema = null;
+                }
+            }
+
+            return new LiveLinkToolDescriptor
+            {
+                Name = entry.ToolName,
+                Description = entry.Description ?? string.Empty,
+                Category = entry.Category ?? string.Empty,
+                Tags = entry.Tags?.ToList() ?? new List<string>(),
+                Visibility = entry.Visibility,
+                RequiresMainThread = entry.RequiresMainThread,
+                IsMutation = entry.IsMutation,
+                DeclaringType = method.DeclaringType,
+                MethodName = method.Name,
+                Method = method,
+                TargetInstance = null,
+                Parameters = parameters,
+                InputSchema = inputSchema
+            };
+        }
+
+        /// <summary>
+        /// Resolves a MethodInfo from a cache entry.
+        /// </summary>
+        private MethodInfo ResolveMethodFromCache(LiveLinkToolCacheEntry entry)
+        {
+            if (string.IsNullOrEmpty(entry.AssemblyName) ||
+                string.IsNullOrEmpty(entry.TypeName) ||
+                string.IsNullOrEmpty(entry.MethodName))
+            {
+                return null;
+            }
+
+            try
+            {
+                Assembly assembly = null;
+                var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+                for (int i = 0; i < assemblies.Length; i++)
+                {
+                    if (assemblies[i].GetName().Name == entry.AssemblyName)
+                    {
+                        assembly = assemblies[i];
+                        break;
+                    }
+                }
+
+                if (assembly == null)
+                    return null;
+
+                Type type = assembly.GetType(entry.TypeName, throwOnError: false);
+                if (type == null)
+                    return null;
+
+                // Get the method (static, public or non-public)
+                MethodInfo method = type.GetMethod(
+                    entry.MethodName,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static
+                );
+
+                return method;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Scans assemblies for [LiveLinkTool] attributes (fallback when no cache available).
+        /// </summary>
+        private void ScanAssembliesForAttributes(IReadOnlyList<string> assemblyAllowList)
+        {
             var allAssemblies = AppDomain.CurrentDomain.GetAssemblies();
             for (int assemblyIndex = 0; assemblyIndex < allAssemblies.Length; assemblyIndex++)
             {
@@ -35,7 +230,6 @@ namespace LiveLink.Tools
                 {
                     continue;
                 }
-
                 Type[] types;
                 try
                 {
@@ -49,12 +243,10 @@ namespace LiveLink.Tools
                 {
                     continue;
                 }
-
                 if (types == null)
                 {
                     continue;
                 }
-
                 for (int typeIndex = 0; typeIndex < types.Length; typeIndex++)
                 {
                     Type type = types[typeIndex];
@@ -62,7 +254,6 @@ namespace LiveLink.Tools
                     {
                         continue;
                     }
-
                     BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
                     MethodInfo[] methods = type.GetMethods(flags);
                     for (int methodIndex = 0; methodIndex < methods.Length; methodIndex++)
@@ -73,26 +264,14 @@ namespace LiveLink.Tools
                         {
                             continue;
                         }
-
                         LiveLinkToolDescriptor descriptor = CreateDescriptor(type, method, attribute);
                         if (descriptor == null)
                         {
                             continue;
                         }
-
                         AddDescriptor(descriptor, type.FullName + "." + method.Name);
                     }
                 }
-            }
-
-            List<LiveLinkToolDescriptor> manifestDescriptors = LiveLinkToolManifestResolver.ResolveFromAssets(manifestAssets);
-            for (int i = 0; i < manifestDescriptors.Count; i++)
-            {
-                LiveLinkToolDescriptor descriptor = manifestDescriptors[i];
-                string source = descriptor.DeclaringType != null
-                    ? descriptor.DeclaringType.FullName + "." + descriptor.MethodName + " [manifest]"
-                    : "manifest";
-                AddDescriptor(descriptor, source);
             }
         }
 
@@ -107,7 +286,6 @@ namespace LiveLink.Tools
             {
                 return;
             }
-
             if (_toolsByName.ContainsKey(descriptor.Name))
             {
                 string duplicate = descriptor.Name + " (" + source + ")";
@@ -115,7 +293,6 @@ namespace LiveLink.Tools
                 Debug.LogWarning("[LiveLink-MCP] Duplicate dynamic tool name ignored: " + duplicate);
                 return;
             }
-
             _toolsByName.Add(descriptor.Name, descriptor);
         }
 
@@ -125,13 +302,11 @@ namespace LiveLink.Tools
             {
                 return false;
             }
-
             string assemblyName = assembly.GetName().Name;
             if (string.IsNullOrEmpty(assemblyName))
             {
                 return false;
             }
-
             if (assemblyName.StartsWith("System", StringComparison.OrdinalIgnoreCase) ||
                 assemblyName.StartsWith("Microsoft", StringComparison.OrdinalIgnoreCase) ||
                 assemblyName.StartsWith("mscorlib", StringComparison.OrdinalIgnoreCase) ||
@@ -139,12 +314,10 @@ namespace LiveLink.Tools
             {
                 return false;
             }
-
             if (assemblyAllowList == null || assemblyAllowList.Count == 0)
             {
                 return true;
             }
-
             for (int i = 0; i < assemblyAllowList.Count; i++)
             {
                 string allowed = assemblyAllowList[i];
@@ -152,13 +325,11 @@ namespace LiveLink.Tools
                 {
                     continue;
                 }
-
                 if (string.Equals(assemblyName, allowed.Trim(), StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
             }
-
             return false;
         }
 
@@ -170,7 +341,6 @@ namespace LiveLink.Tools
                 Debug.LogWarning("[LiveLink-MCP] Ignoring tool with empty name on method: " + declaringType.FullName + "." + method.Name);
                 return null;
             }
-
             bool isStatic = method.IsStatic;
             object target = null;
             if (!isStatic)
@@ -178,7 +348,6 @@ namespace LiveLink.Tools
                 Debug.LogWarning("[LiveLink-MCP] Ignoring non-static tool method. Use static methods for dynamic tools: " + declaringType.FullName + "." + method.Name);
                 return null;
             }
-
             var descriptor = new LiveLinkToolDescriptor
             {
                 Name = toolName,
@@ -192,7 +361,6 @@ namespace LiveLink.Tools
                 Method = method,
                 TargetInstance = target
             };
-
             if (attribute.Tags != null)
             {
                 for (int i = 0; i < attribute.Tags.Length; i++)
@@ -204,7 +372,6 @@ namespace LiveLink.Tools
                     }
                 }
             }
-
             ParameterInfo[] parameters = method.GetParameters();
             for (int index = 0; index < parameters.Length; index++)
             {
@@ -213,7 +380,6 @@ namespace LiveLink.Tools
                 string paramName = paramAttribute != null && !string.IsNullOrWhiteSpace(paramAttribute.Name)
                     ? paramAttribute.Name.Trim()
                     : parameter.Name;
-
                 var parameterDescriptor = new LiveLinkToolParameterDescriptor
                 {
                     Name = paramName,
@@ -224,15 +390,12 @@ namespace LiveLink.Tools
                     DefaultValue = parameter.HasDefaultValue ? parameter.DefaultValue : null,
                     Position = index
                 };
-
                 if (!parameterDescriptor.Required)
                 {
                     parameterDescriptor.Required = !parameter.HasDefaultValue && !IsNullable(parameter.ParameterType);
                 }
-
                 descriptor.Parameters.Add(parameterDescriptor);
             }
-
             descriptor.InputSchema = BuildInputSchema(descriptor.Parameters);
             return descriptor;
         }
@@ -241,7 +404,6 @@ namespace LiveLink.Tools
         {
             var properties = new JObject();
             var required = new JArray();
-
             for (int i = 0; i < parameters.Count; i++)
             {
                 LiveLinkToolParameterDescriptor parameter = parameters[i];
@@ -250,86 +412,58 @@ namespace LiveLink.Tools
                 {
                     schema["description"] = parameter.Description;
                 }
-
                 properties[parameter.Name] = schema;
-
                 if (parameter.Required)
                 {
                     required.Add(parameter.Name);
                 }
             }
-
-            var inputSchema = new JObject
+            var result = new JObject
             {
                 ["type"] = "object",
                 ["properties"] = properties
             };
-
             if (required.Count > 0)
             {
-                inputSchema["required"] = required;
+                result["required"] = required;
             }
-
-            return inputSchema;
+            return result;
         }
 
         private static JObject BuildTypeSchema(Type type)
         {
-            Type normalized = Nullable.GetUnderlyingType(type) ?? type;
-
-            if (normalized == typeof(string) || normalized.IsEnum)
+            Type nonNullable = Nullable.GetUnderlyingType(type) ?? type;
+            if (nonNullable == typeof(string))
             {
                 return new JObject { ["type"] = "string" };
             }
-
-            if (normalized == typeof(bool))
-            {
-                return new JObject { ["type"] = "boolean" };
-            }
-
-            if (normalized == typeof(byte) || normalized == typeof(sbyte) ||
-                normalized == typeof(short) || normalized == typeof(ushort) ||
-                normalized == typeof(int) || normalized == typeof(uint) ||
-                normalized == typeof(long) || normalized == typeof(ulong))
+            if (nonNullable == typeof(int) || nonNullable == typeof(long) || nonNullable == typeof(short) || nonNullable == typeof(byte))
             {
                 return new JObject { ["type"] = "integer" };
             }
-
-            if (normalized == typeof(float) || normalized == typeof(double) || normalized == typeof(decimal))
+            if (nonNullable == typeof(float) || nonNullable == typeof(double) || nonNullable == typeof(decimal))
             {
                 return new JObject { ["type"] = "number" };
             }
-
-            if (normalized.IsArray)
+            if (nonNullable == typeof(bool))
             {
-                Type elementType = normalized.GetElementType() ?? typeof(object);
+                return new JObject { ["type"] = "boolean" };
+            }
+            if (nonNullable.IsArray || (nonNullable.IsGenericType && nonNullable.GetGenericTypeDefinition() == typeof(List<>)))
+            {
+                Type itemType = nonNullable.IsArray ? nonNullable.GetElementType() : nonNullable.GetGenericArguments()[0];
                 return new JObject
                 {
                     ["type"] = "array",
-                    ["items"] = BuildTypeSchema(elementType)
+                    ["items"] = BuildTypeSchema(itemType)
                 };
             }
-
-            if (typeof(System.Collections.IEnumerable).IsAssignableFrom(normalized) && normalized != typeof(string))
-            {
-                return new JObject
-                {
-                    ["type"] = "array",
-                    ["items"] = new JObject { ["type"] = "object" }
-                };
-            }
-
             return new JObject { ["type"] = "object" };
         }
 
         private static bool IsNullable(Type type)
         {
-            if (!type.IsValueType)
-            {
-                return true;
-            }
-
-            return Nullable.GetUnderlyingType(type) != null;
+            return !type.IsValueType || Nullable.GetUnderlyingType(type) != null;
         }
     }
 }

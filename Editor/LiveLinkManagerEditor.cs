@@ -43,6 +43,7 @@ namespace LiveLink.Editor
         private SerializedProperty _dynamicAgentToolDenyList;
         private SerializedProperty _dynamicAllowedCategories;
         private SerializedProperty _dynamicAllowedTags;
+        private SerializedProperty _toolCacheAsset;
 
         private void OnEnable()
         {
@@ -73,6 +74,7 @@ namespace LiveLink.Editor
             _dynamicAgentToolDenyList = serializedObject.FindProperty("_dynamicAgentToolDenyList");
             _dynamicAllowedCategories = serializedObject.FindProperty("_dynamicAllowedCategories");
             _dynamicAllowedTags = serializedObject.FindProperty("_dynamicAllowedTags");
+            _toolCacheAsset = serializedObject.FindProperty("_toolCacheAsset");
 
             RefreshToolList();
         }
@@ -440,8 +442,57 @@ namespace LiveLink.Editor
                 return;
             }
 
+            EditorGUILayout.LabelField("Discovery", EditorStyles.miniBoldLabel);
+            EditorGUILayout.PropertyField(_toolCacheAsset, new GUIContent("Tool Cache Asset"));
+
+            LiveLink.Tools.LiveLinkToolCacheAsset cacheAsset = _toolCacheAsset.objectReferenceValue as LiveLink.Tools.LiveLinkToolCacheAsset;
+            if (cacheAsset == null)
+            {
+                EditorGUILayout.HelpBox("No tool cache asset assigned. Runtime will fall back to reflection scanning.", MessageType.Warning);
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    cacheAsset.IsStale
+                        ? "Tool cache is stale. Rebuild to avoid runtime reflection scanning."
+                        : "Tool cache is valid.",
+                    cacheAsset.IsStale ? MessageType.Warning : MessageType.Info);
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Rebuild Tool Cache", GUILayout.Width(140)))
+            {
+                LiveLink.Editor.Tools.LiveLinkToolCacheBuilder.RebuildCache();
+            }
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
+
             EditorGUILayout.PropertyField(_dynamicToolAssemblyAllowList, new GUIContent("Assembly Allow List"), true);
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField("Manifest Tools", EditorStyles.miniBoldLabel);
             EditorGUILayout.PropertyField(_dynamicToolManifestAssets, new GUIContent("Tool Manifest Assets"), true);
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Create Manifest", GUILayout.Width(120)))
+            {
+                CreateNewManifestAsset();
+            }
+
+            bool hasManifest = _dynamicToolManifestAssets.arraySize > 0;
+            GUI.enabled = hasManifest;
+            if (GUILayout.Button("Ping First Manifest", GUILayout.Width(140)))
+            {
+                Object first = _dynamicToolManifestAssets.GetArrayElementAtIndex(0).objectReferenceValue;
+                if (first != null)
+                {
+                    Selection.activeObject = first;
+                    EditorGUIUtility.PingObject(first);
+                }
+            }
+            GUI.enabled = true;
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.Space(2);
             EditorGUILayout.LabelField("Embedded Agent", EditorStyles.miniBoldLabel);
@@ -465,6 +516,33 @@ namespace LiveLink.Editor
                 "Dynamic tools come from methods marked with LiveLinkToolAttribute. " +
                 "Allow/Deny lists apply after visibility and mutation rules.",
                 MessageType.None);
+        }
+
+        private void CreateNewManifestAsset()
+        {
+            string path = EditorUtility.SaveFilePanelInProject(
+                "Create LiveLink Tool Manifest",
+                "LiveLinkToolManifest",
+                "asset",
+                "Choose a location for the new tool manifest asset.");
+
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+
+            LiveLink.Tools.LiveLinkToolManifestAsset manifest = ScriptableObject.CreateInstance<LiveLink.Tools.LiveLinkToolManifestAsset>();
+            AssetDatabase.CreateAsset(manifest, path);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+
+            int insertIndex = _dynamicToolManifestAssets.arraySize;
+            _dynamicToolManifestAssets.arraySize++;
+            _dynamicToolManifestAssets.GetArrayElementAtIndex(insertIndex).objectReferenceValue = manifest;
+            serializedObject.ApplyModifiedProperties();
+
+            Selection.activeObject = manifest;
+            EditorGUIUtility.PingObject(manifest);
         }
 
         private void DrawToolListSection()

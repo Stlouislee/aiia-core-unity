@@ -123,6 +123,10 @@ namespace LiveLink
         [Tooltip("Optional tag allow list for dynamic tools. If set, tool must match at least one tag.")]
         private List<string> _dynamicAllowedTags = new List<string>();
 
+        [SerializeField]
+        [Tooltip("Pre-computed tool cache asset. If assigned and valid, avoids runtime reflection scanning.")]
+        private LiveLinkToolCacheAsset _toolCacheAsset;
+
         #endregion
 
         #region Properties
@@ -235,6 +239,11 @@ namespace LiveLink
         /// Gets optional manifest assets that map external methods into MCP tools.
         /// </summary>
         public IReadOnlyList<LiveLinkToolManifestAsset> DynamicToolManifestAssets => _dynamicToolManifestAssets;
+
+        /// <summary>
+        /// Gets the pre-computed tool cache asset, if assigned.
+        /// </summary>
+        public LiveLinkToolCacheAsset ToolCacheAsset => _toolCacheAsset;
 
         #endregion
 
@@ -1102,7 +1111,7 @@ namespace LiveLink
             }
 
             var registry = new LiveLinkToolRegistry();
-            registry.Rebuild(_dynamicToolAssemblyAllowList, _dynamicToolManifestAssets);
+            registry.Rebuild(_dynamicToolAssemblyAllowList, _dynamicToolManifestAssets, _toolCacheAsset);
 
             LiveLinkToolExposurePolicy policy = BuildDynamicToolExposurePolicy();
             foreach (LiveLinkToolDescriptor descriptor in registry.ToolsByName.Values)
