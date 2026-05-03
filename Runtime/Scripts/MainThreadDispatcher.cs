@@ -6,6 +6,35 @@ using UnityEngine;
 namespace LiveLink
 {
     /// <summary>
+    /// A <see cref="SynchronizationContext"/> that posts continuations back to the Unity
+    /// main thread via <see cref="MainThreadDispatcher"/>. Installing this context ensures
+    /// that <c>async/await</c> continuations inside methods that start on the main thread
+    /// (e.g. those dispatched via <see cref="MainThreadDispatcher.Enqueue"/>) continue
+    /// executing on the main thread after each <c>await</c> point.
+    /// </summary>
+    internal sealed class UnityMainThreadSynchronizationContext : SynchronizationContext
+    {
+        public override void Post(SendOrPostCallback d, object state)
+        {
+            MainThreadDispatcher.Enqueue(() => d(state));
+        }
+
+        public override void Send(SendOrPostCallback d, object state)
+        {
+            if (MainThreadDispatcher.IsMainThread)
+            {
+                d(state);
+            }
+            else
+            {
+                using var done = new ManualResetEventSlim(false);
+                MainThreadDispatcher.Enqueue(() => { d(state); done.Set(); });
+                done.Wait();
+            }
+        }
+    }
+
+    /// <summary>
     /// Dispatches actions from background threads to the Unity main thread.
     /// Unity API calls must be executed on the main thread to avoid crashes.
     /// </summary>
@@ -110,6 +139,10 @@ namespace LiveLink
             _instance = this;
             _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             DontDestroyOnLoad(gameObject);
+
+            // Install a SynchronizationContext so that async/await continuations
+            // inside methods dispatched to the main thread continue on the main thread.
+            SynchronizationContext.SetSynchronizationContext(new UnityMainThreadSynchronizationContext());
         }
 
         private void Update()

@@ -445,28 +445,6 @@ namespace LiveLink
                 }
 
                 MCPResponse mcpResponse = null;
-                if (method == "initialize" || method == "notifications/initialized")
-                {
-                    try
-                    {
-                        using (LiveLinkMcpRequestContext.PushConsumer(consumer))
-                        {
-                            mcpResponse = await _mcpHandler.HandleRequestAsync(mcpRequest);
-                        }
-
-                        MarkSessionInitializedIfNeeded(method, mcpRequest, mcpResponse, session, sessionId);
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogError($"[LiveLink-MCP] Error processing request '{method}': {ex}");
-                        mcpResponse = new MCPResponse
-                        {
-                            Id = mcpRequest?.Id,
-                            Error = new MCPError { Code = -32603, Message = $"Internal error: {ex.Message}" }
-                        };
-                    }
-                }
-                else
                 {
                     var tcs = new TaskCompletionSource<MCPResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
                     MainThreadDispatcher.Enqueue(() =>
