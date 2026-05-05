@@ -461,6 +461,18 @@ namespace LiveLink.Agent.Editor
                         }
                     }
 
+                    if (update.Contents != null)
+                    {
+                        foreach (AIContent content in update.Contents)
+                        {
+                            if (content is UsageContent uc)
+                            {
+                                inputTokens = (int)(uc.Details?.InputTokenCount ?? 0);
+                                outputTokens = (int)(uc.Details?.OutputTokenCount ?? 0);
+                            }
+                        }
+                    }
+
                     if (update.FinishReason.HasValue)
                     {
                         finishReason = update.FinishReason.Value.ToString();
