@@ -312,7 +312,7 @@ namespace LiveLink.Agent.Editor
             ProjectWindowUtil.StartNameEditingIfProjectWindowExists(
                 0,
                 CreateInstance<CreateConfigAssetAction>(),
-                defaultFileName,
+                "Assets/" + defaultFileName,
                 EditorGUIUtility.IconContent("ScriptableObject Icon").image as Texture2D,
                 null);
         }
