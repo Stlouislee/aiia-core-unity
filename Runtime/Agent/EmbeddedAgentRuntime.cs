@@ -345,6 +345,9 @@ namespace LiveLink.Agent
 
                 _isInitialized = true;
 
+                // Register web chat handler on the local MCP server.
+                RegisterChatHandler();
+
                 // Start MCP connection heartbeat.
                 StartMcpHeartbeat();
 
@@ -1055,6 +1058,75 @@ namespace LiveLink.Agent
 #else
             return configuredTimeout;
 #endif
+        }
+
+        // ──────────────────────── Web Chat ────────────────────────
+
+        private void RegisterChatHandler()
+        {
+            if (_liveLinkManager == null) return;
+
+            _liveLinkManager.SetChatStreamHandler((messageJson, ct) => HandleChatStreamAsync(messageJson, ct));
+        }
+
+        private async IAsyncEnumerable<string> HandleChatStreamAsync(
+            string messageJson,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            string userMessage;
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(messageJson);
+                userMessage = parsed.GetProperty("message").GetString();
+            }
+            catch
+            {
+                yield return System.Text.Json.JsonSerializer.Serialize(new { error = "Invalid request. Expected JSON with 'message' field." });
+                yield break;
+            }
+
+            if (string.IsNullOrWhiteSpace(userMessage))
+            {
+                yield return System.Text.Json.JsonSerializer.Serialize(new { error = "Message cannot be empty." });
+                yield break;
+            }
+
+            await foreach (AgentResponseUpdate update in RunStreamingAsync(userMessage, cancellationToken).ConfigureAwait(false))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var obj = new System.Collections.Generic.Dictionary<string, object>();
+
+                if (update.Text != null)
+                    obj["text"] = update.Text;
+
+                if (update.FinishReason.HasValue)
+                    obj["finishReason"] = update.FinishReason.Value.ToString();
+
+                if (update.Contents != null)
+                {
+                    var contents = new System.Collections.Generic.List<object>();
+                    foreach (var content in update.Contents)
+                    {
+                        if (content is FunctionCallContent fcc)
+                        {
+                            contents.Add(new { type = "FunctionCall", name = fcc.Name, callId = fcc.CallId });
+                        }
+                        else if (content is FunctionResultContent frc)
+                        {
+                            contents.Add(new { type = "FunctionResult", callId = frc.CallId, result = frc.Result?.ToString() });
+                        }
+                        else if (content is UsageContent uc)
+                        {
+                            contents.Add(new { type = "Usage", inputTokens = uc.Details?.InputTokenCount ?? 0, outputTokens = uc.Details?.OutputTokenCount ?? 0 });
+                        }
+                    }
+                    if (contents.Count > 0)
+                        obj["contents"] = contents;
+                }
+
+                yield return System.Text.Json.JsonSerializer.Serialize(obj);
+            }
         }
 
         // ──────────────────────── MCP Heartbeat & Reconnection ────────────────────────

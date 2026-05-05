@@ -157,6 +157,12 @@ namespace LiveLink
         private CancellationTokenSource _cancellationTokenSource;
         private readonly MCPToolHandler _mcpHandler;
         private readonly int _port;
+
+        /// <summary>
+        /// Optional handler for web chat requests. Receives (messageJson, cancellationToken) and
+        /// returns an async enumerable of JSON-encoded AgentResponseUpdate objects.
+        /// </summary>
+        public Func<string, CancellationToken, IAsyncEnumerable<string>> ChatStreamHandler { get; set; }
         private bool _isRunning;
         private readonly Dictionary<string, MCPSession> _sessions = new Dictionary<string, MCPSession>();
         private readonly object _sessionsLock = new object();
@@ -331,6 +337,24 @@ namespace LiveLink
                                 version = "1.0",
                                 transport = "HTTP+SSE"
                             }));
+                        break;
+
+                    case "/chat":
+                    case "/chat/":
+                        await WriteHttpResponseAsync(stream, 200, "text/html; charset=utf-8", GetChatHtml());
+                        break;
+
+                    case "/chat/api":
+                    case "/chat/api/":
+                        if (request.Method == "POST")
+                        {
+                            keepConnectionOpen = true;
+                            await HandleChatApiAsync(request, stream, cancellationToken);
+                        }
+                        else
+                        {
+                            await WriteHttpResponseAsync(stream, 405);
+                        }
                         break;
 
                     default:
@@ -622,6 +646,219 @@ namespace LiveLink
             Stop();
             _cancellationTokenSource?.Dispose();
             _listener = null;
+        }
+
+        // ───────────────────── Web Chat API ─────────────────────
+
+        private async Task HandleChatApiAsync(McpHttpRequest request, NetworkStream stream, CancellationToken cancellationToken)
+        {
+            if (ChatStreamHandler == null)
+            {
+                await WriteHttpResponseAsync(stream, 503, "application/json",
+                    JsonConvert.SerializeObject(new { error = "Chat handler not configured." }));
+                return;
+            }
+
+            string requestBody = request.Body ?? "{}";
+
+            // Write SSE headers
+            var headerBuilder = new StringBuilder();
+            headerBuilder.Append("HTTP/1.1 200 OK\r\n");
+            headerBuilder.Append("Content-Type: text/event-stream\r\n");
+            headerBuilder.Append("Cache-Control: no-cache\r\n");
+            headerBuilder.Append("Connection: close\r\n");
+            headerBuilder.Append("Access-Control-Allow-Origin: *\r\n");
+            headerBuilder.Append("Access-Control-Allow-Methods: POST, OPTIONS\r\n");
+            headerBuilder.Append("Access-Control-Allow-Headers: Content-Type\r\n");
+            headerBuilder.Append("\r\n");
+            byte[] headerBytes = Encoding.ASCII.GetBytes(headerBuilder.ToString());
+            await stream.WriteAsync(headerBytes, 0, headerBytes.Length);
+            await stream.FlushAsync();
+
+            try
+            {
+                await foreach (string json in ChatStreamHandler(requestBody, cancellationToken).ConfigureAwait(false))
+                {
+                    if (cancellationToken.IsCancellationRequested) break;
+
+                    byte[] eventBytes = Encoding.UTF8.GetBytes($"data: {json}\n\n");
+                    await stream.WriteAsync(eventBytes, 0, eventBytes.Length, cancellationToken).ConfigureAwait(false);
+                    await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Client disconnected or cancelled — expected
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[LiveLink-Chat] Stream error: {ex.Message}");
+            }
+            finally
+            {
+                byte[] doneBytes = Encoding.UTF8.GetBytes("data: [DONE]\n\n");
+                try
+                {
+                    await stream.WriteAsync(doneBytes, 0, doneBytes.Length).ConfigureAwait(false);
+                    await stream.FlushAsync().ConfigureAwait(false);
+                }
+                catch { }
+            }
+        }
+
+        private static string GetChatHtml()
+        {
+            return @"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""UTF-8"">
+<meta name=""viewport"" content=""width=device-width, initial-scale=1.0"">
+<title>LiveLink Agent Chat</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+  #header { padding: 12px 16px; background: #16213e; border-bottom: 1px solid #0f3460; display: flex; align-items: center; gap: 12px; }
+  #header h1 { font-size: 16px; font-weight: 600; color: #e94560; }
+  #header .status { font-size: 12px; color: #888; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: #0f3460; color: #fff; border-bottom-right-radius: 4px; }
+  .msg.agent { align-self: flex-start; background: #16213e; border: 1px solid #0f3460; border-bottom-left-radius: 4px; }
+  .msg.system { align-self: center; color: #888; font-size: 12px; font-style: italic; }
+  .msg.error { align-self: center; color: #e94560; font-size: 13px; background: rgba(233,69,96,0.1); border: 1px solid rgba(233,69,96,0.3); }
+  .msg.tool { align-self: flex-start; background: #1a1a3e; border: 1px solid #333; font-size: 12px; font-family: monospace; color: #aaa; }
+  .msg .label { font-size: 11px; color: #888; margin-bottom: 4px; }
+  #input-area { padding: 12px 16px; background: #16213e; border-top: 1px solid #0f3460; display: flex; gap: 8px; }
+  #input { flex: 1; padding: 10px 14px; border: 1px solid #0f3460; border-radius: 8px; background: #1a1a2e; color: #e0e0e0; font-size: 14px; outline: none; resize: none; min-height: 42px; max-height: 120px; font-family: inherit; }
+  #input:focus { border-color: #e94560; }
+  #send { padding: 10px 20px; background: #e94560; color: #fff; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 600; }
+  #send:hover { background: #c73650; }
+  #send:disabled { background: #444; cursor: not-allowed; }
+  #stop { padding: 10px 16px; background: #444; color: #fff; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; display: none; }
+  #stop:hover { background: #666; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #555; border-top-color: #e94560; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 6px; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div id=""header"">
+    <h1>🤖 LiveLink Agent</h1>
+    <span class=""status"" id=""status"">Ready</span>
+  </div>
+  <div id=""messages""></div>
+  <div id=""input-area"">
+    <textarea id=""input"" placeholder=""Type a message..."" rows=""1""></textarea>
+    <button id=""send"" onclick=""sendMsg()"">Send</button>
+    <button id=""stop"" onclick=""stopStream()"">Stop</button>
+  </div>
+<script>
+const msgs = document.getElementById('messages');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const stopBtn = document.getElementById('stop');
+const statusEl = document.getElementById('status');
+let controller = null;
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+});
+
+function addMsg(text, cls) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  msgs.appendChild(d);
+  msgs.scrollTop = msgs.scrollHeight;
+  return d;
+}
+
+async function sendMsg() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  input.style.height = 'auto';
+
+  addMsg(text, 'user');
+  const agentEl = addMsg('', 'agent');
+  agentEl.innerHTML = '<span class=""spinner""></span> Thinking...';
+
+  sendBtn.disabled = true;
+  sendBtn.style.display = 'none';
+  stopBtn.style.display = 'inline-block';
+  statusEl.textContent = 'Streaming...';
+
+  controller = new AbortController();
+  try {
+    const resp = await fetch('/chat/api', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+      signal: controller.signal
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullText = '';
+    let tools = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') break;
+        try {
+          const update = JSON.parse(data);
+          if (update.text) fullText += update.text;
+          if (update.contents) {
+            for (const c of update.contents) {
+              if (c.type === 'FunctionCall') {
+                tools.push('🔧 ' + (c.name || '?'));
+              }
+            }
+          }
+        } catch {}
+      }
+      agentEl.innerHTML = (tools.length ? '<div style=""font-size:11px;color:#888;margin-bottom:4px"">' + tools.join(', ') + '</div>' : '') + escHtml(fullText) + ' ▌';
+    }
+    agentEl.innerHTML = (tools.length ? '<div style=""font-size:11px;color:#888;margin-bottom:4px"">' + tools.join(', ') + '</div>' : '') + escHtml(fullText || '(no response)');
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      agentEl.textContent = '⏹ Stopped.';
+    } else {
+      agentEl.className = 'msg error';
+      agentEl.textContent = 'Error: ' + e.message;
+    }
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+    statusEl.textContent = 'Ready';
+    controller = null;
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+}
+
+function stopStream() {
+  if (controller) controller.abort();
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>";
         }
 
         private async Task ProcessRequestOnMainThreadAsync(
