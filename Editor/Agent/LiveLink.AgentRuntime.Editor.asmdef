@@ -10,8 +10,14 @@
     ],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
-    "overrideReferences": false,
-    "precompiledReferences": [],
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "Microsoft.Agents.AI.Abstractions.dll",
+        "Microsoft.Agents.AI.dll",
+        "Microsoft.Extensions.AI.Abstractions.dll",
+        "Microsoft.Extensions.AI.dll",
+        "System.Text.Json.dll"
+    ],
     "autoReferenced": true,
     "defineConstraints": [],
     "versionDefines": [],

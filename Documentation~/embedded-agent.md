@@ -1,7 +1,7 @@
 # Embedded Agent Runtime — Technical Documentation
 
 > **Package:** aiia-core-unity (LiveLink)  
-> **Last updated:** 2026-05-05  
+> **Last updated:** 2026-05-05 (updated: aligned with Microsoft Agent Framework, added chat window)  
 > **Audience:** Unity developers integrating AI agents into their applications
 
 ---
@@ -102,12 +102,29 @@ Start()
         ├── Create AgentSession
         └── Set status: "Ready"
 
-SendMessageAsync(message)
+RunAsync(message)                                              ← Primary API
   ├── Auto-initialize if not already done
   ├── Acquire run lock (serialized execution)
-  ├── Run agent → collect response
-  ├── Fire OnResponseReceived
+  ├── Run agent → collect AgentResponse
+  │     ├── Messages[] — all intermediate steps (tool calls, results, text)
+  │     ├── Usage — token counts (input, output)
+  │     └── FinishReason — Stop, ToolCalls, Length, etc.
+  ├── Fire OnResponseReceived (text convenience)
   └── Release run lock
+
+RunStreamingAsync(message)                                     ← Streaming API
+  ├── Auto-initialize if not already done
+  ├── Acquire run lock
+  ├── Stream AgentResponseUpdate chunks
+  │     ├── TextContent — text deltas
+  │     ├── FunctionCallContent — tool calls (name, args, callId)
+  │     └── FunctionResultContent — tool results
+  ├── Fire OnToolCall events per FunctionCallContent
+  ├── Fire OnResponseReceived when complete
+  └── Release run lock
+
+SendMessageAsync(message)                                      ← Convenience (backward compat)
+  └── Calls RunAsync → returns response.Text
 
 ShutdownAsync()
   ├── Dispose all MCP client connections
@@ -396,7 +413,28 @@ If a history file fails to parse, the provider:
 
 ---
 
-## 6. UI Events Reference
+## 6. UI Events & Chat Window
+
+### 6.1 Play Mode Chat Window
+
+A built-in editor window lets you chat with the agent interactively during Play Mode.
+
+**Open via:** `LiveLink > Agent Chat` menu, or click **"Open Chat Window"** in the EmbeddedAgentRuntime Inspector.
+
+**Features:**
+- Scrollable message area with user/agent/tool-call/tool-result/error entries
+- Streaming text display with real-time updates and spinner animation
+- Collapsible tool call foldouts showing name, arguments, and call ID
+- Collapsible tool result foldouts showing return values
+- Per-response usage display: input/output tokens, duration, finish reason
+- Enter to send, Shift+Enter for newline
+- Stop button to cancel in-flight streaming
+- Auto-scroll toggle, usage toggle, clear button
+
+**How it works internally:**
+The chat window uses `RunStreamingAsync` to get typed `AgentResponseUpdate` chunks. It inspects each update's `Contents` list for `FunctionCallContent` and `FunctionResultContent` to build the structured message timeline. `UsageContent` items provide token statistics.
+
+### 6.2 Event Reference
 
 All events are `public` fields on `EmbeddedAgentRuntime` and can be wired from the Inspector or subscribed to in code.
 
@@ -774,9 +812,9 @@ private static async Task<bool> ProbeLocalServerHealthAsync(Uri healthUri)
 
 `HttpWebRequest` is obsolete in .NET 6+. While Unity uses .NET Standard 2.1 where it's still available, using `HttpClient` would be more consistent with the rest of the codebase and avoid future deprecation warnings.
 
-### 8.9 No Streaming Support
+### 8.9 ~~No Streaming Support~~ ✅ Fixed
 
-`SendMessageAsync` calls `_agent.RunAsync()` and waits for the complete response before firing `OnResponseReceived`. For long-running agent responses (multi-step tool calls), the UI receives no feedback until the entire chain completes. The `OnStatusChanged` event only shows "Running agent..." for the entire duration.
+`RunStreamingAsync` now returns `IAsyncEnumerable<AgentResponseUpdate>` with typed content items (`TextContent`, `FunctionCallContent`, `FunctionResultContent`). The chat window uses this for real-time streaming display. `SendMessageAsync` remains as a convenience wrapper for backward compatibility.
 
 ### 8.10 `ToolCallNotifyingFunction` Serializes Arguments Twice
 
