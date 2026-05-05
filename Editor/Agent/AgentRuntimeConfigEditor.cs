@@ -40,6 +40,8 @@ namespace LiveLink.Agent.Editor
         private SerializedProperty _maxPersistedMessages;
         private SerializedProperty _maxHistoryFileSizeBytes;
         private SerializedProperty _externalMcpServers;
+        private SerializedProperty _remoteA2AAgents;
+        private SerializedProperty _a2aHostConfig;
 
         private void OnEnable()
         {
@@ -60,6 +62,8 @@ namespace LiveLink.Agent.Editor
             _maxPersistedMessages = serializedObject.FindProperty("_maxPersistedMessages");
             _maxHistoryFileSizeBytes = serializedObject.FindProperty("_maxHistoryFileSizeBytes");
             _externalMcpServers = serializedObject.FindProperty("_externalMcpServers");
+            _remoteA2AAgents = serializedObject.FindProperty("_remoteA2AAgents");
+            _a2aHostConfig = serializedObject.FindProperty("_a2aHostConfig");
         }
 
         public override void OnInspectorGUI()
@@ -75,6 +79,10 @@ namespace LiveLink.Agent.Editor
             DrawChatHistoryPersistenceSection();
             EditorGUILayout.Space(8);
             DrawExternalServersSection();
+            EditorGUILayout.Space(8);
+            DrawRemoteA2AAgentsSection();
+            EditorGUILayout.Space(8);
+            DrawA2AHostSection();
 
             serializedObject.ApplyModifiedProperties();
         }
@@ -303,6 +311,96 @@ namespace LiveLink.Agent.Editor
             }
 
             EditorUtility.DisplayDialog("MCP Connection Successful", builder.ToString(), "OK");
+        }
+
+        private void DrawRemoteA2AAgentsSection()
+        {
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField("Remote A2A Agents", EditorStyles.boldLabel);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("Add Agent", GUILayout.Width(100)))
+            {
+                _remoteA2AAgents.arraySize++;
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (_remoteA2AAgents.arraySize == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    "Add remote A2A-compliant agents (OpenClaw, Hermes, etc.) here. " +
+                    "Each entry becomes a callable tool (e.g., \"ask_openclaw\") available to the embedded agent.",
+                    MessageType.Info);
+                return;
+            }
+
+            for (int i = 0; i < _remoteA2AAgents.arraySize; i++)
+            {
+                SerializedProperty agentProperty = _remoteA2AAgents.GetArrayElementAtIndex(i);
+                SerializedProperty displayName = agentProperty.FindPropertyRelative("_displayName");
+                string title = string.IsNullOrWhiteSpace(displayName.stringValue)
+                    ? string.Format("Agent {0}", i + 1)
+                    : displayName.stringValue;
+
+                agentProperty.isExpanded = EditorGUILayout.BeginFoldoutHeaderGroup(agentProperty.isExpanded, title);
+                if (agentProperty.isExpanded)
+                {
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                    DrawRemoteA2AAgent(agentProperty, i);
+                    EditorGUILayout.EndVertical();
+                }
+                EditorGUILayout.EndFoldoutHeaderGroup();
+                EditorGUILayout.Space(4);
+            }
+        }
+
+        private void DrawRemoteA2AAgent(SerializedProperty agentProperty, int index)
+        {
+            EditorGUILayout.PropertyField(agentProperty.FindPropertyRelative("_enabled"));
+            EditorGUILayout.PropertyField(agentProperty.FindPropertyRelative("_displayName"), new GUIContent("Display Name"));
+            EditorGUILayout.PropertyField(agentProperty.FindPropertyRelative("_endpoint"));
+            EditorGUILayout.PropertyField(agentProperty.FindPropertyRelative("_useAgentCardDiscovery"), new GUIContent("Auto-Discover via Agent Card"));
+            EditorGUILayout.PropertyField(agentProperty.FindPropertyRelative("_connectionTimeoutSeconds"), new GUIContent("Connection Timeout (Seconds)"));
+            EditorGUILayout.PropertyField(agentProperty.FindPropertyRelative("_headers"), new GUIContent("Headers"), true);
+            EditorGUILayout.PropertyField(agentProperty.FindPropertyRelative("_enableStreaming"), new GUIContent("Enable Streaming"));
+            EditorGUILayout.PropertyField(agentProperty.FindPropertyRelative("_delegateToolPrefix"), new GUIContent("Tool Name Prefix"));
+            EditorGUILayout.PropertyField(agentProperty.FindPropertyRelative("_acceptSelfSignedCertificates"), new GUIContent("Accept Self-Signed Certificates"));
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("Remove", GUILayout.Width(80)))
+            {
+                _remoteA2AAgents.DeleteArrayElementAtIndex(index);
+                serializedObject.ApplyModifiedProperties();
+                GUIUtility.ExitGUI();
+            }
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawA2AHostSection()
+        {
+            EditorGUILayout.LabelField("A2A Hosting", EditorStyles.boldLabel);
+
+            SerializedProperty enabledProp = _a2aHostConfig.FindPropertyRelative("_enabled");
+            EditorGUILayout.PropertyField(enabledProp, new GUIContent("Enable A2A Hosting"));
+
+            if (!enabledProp.boolValue)
+            {
+                EditorGUILayout.HelpBox(
+                    "Enable A2A hosting to make this Unity agent discoverable by external A2A clients.",
+                    MessageType.Info);
+                return;
+            }
+
+            EditorGUI.indentLevel++;
+            EditorGUILayout.PropertyField(_a2aHostConfig.FindPropertyRelative("_port"), new GUIContent("Port"));
+            EditorGUILayout.PropertyField(_a2aHostConfig.FindPropertyRelative("_agentName"), new GUIContent("Agent Name"));
+            EditorGUILayout.PropertyField(_a2aHostConfig.FindPropertyRelative("_agentDescription"), new GUIContent("Description"));
+            EditorGUILayout.PropertyField(_a2aHostConfig.FindPropertyRelative("_agentVersion"), new GUIContent("Version"));
+            EditorGUILayout.PropertyField(_a2aHostConfig.FindPropertyRelative("_enableStreaming"), new GUIContent("Enable Streaming"));
+            EditorGUILayout.PropertyField(_a2aHostConfig.FindPropertyRelative("_authToken"), new GUIContent("Auth Token"));
+            EditorGUILayout.PropertyField(_a2aHostConfig.FindPropertyRelative("_rateLimitPerMinute"), new GUIContent("Rate Limit Per Minute"));
+            EditorGUILayout.PropertyField(_a2aHostConfig.FindPropertyRelative("_skills"), new GUIContent("Skills"), true);
+            EditorGUI.indentLevel--;
         }
 
         [MenuItem("LiveLink/Create Agent Runtime Config", false, 21)]
