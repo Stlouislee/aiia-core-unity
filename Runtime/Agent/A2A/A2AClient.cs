@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
+using System.Net.Security;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -32,6 +34,16 @@ namespace LiveLink.Agent.A2A
         private readonly Dictionary<string, string> _headers;
         private bool _isDisposed;
 
+        /// <summary>
+        /// Maximum number of SSE reconnection attempts before giving up.
+        /// </summary>
+        private const int MaxReconnectAttempts = 3;
+
+        /// <summary>
+        /// Base delay in milliseconds for exponential backoff on SSE reconnection.
+        /// </summary>
+        private const int ReconnectBaseDelayMs = 1000;
+
         public Uri Endpoint => _endpoint;
 
         public A2AClient(Uri endpoint, Dictionary<string, string> headers = null, float timeoutSeconds = 30f)
@@ -52,6 +64,24 @@ namespace LiveLink.Agent.A2A
             _httpClient = handler != null
                 ? new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(Math.Max(1f, timeoutSeconds)) }
                 : new HttpClient { Timeout = TimeSpan.FromSeconds(Math.Max(1f, timeoutSeconds)) };
+        }
+
+        /// <summary>
+        /// Creates an HttpClientHandler that optionally accepts custom certificates
+        /// (e.g., self-signed or enterprise CA).
+        /// </summary>
+        internal static HttpClientHandler CreateHandlerWithCertificateValidation(
+            Func<HttpRequestMessage, X509Certificate2, X509Chain, SslPolicyErrors, bool> validator = null)
+        {
+            var handler = new HttpClientHandler();
+
+            if (validator != null)
+            {
+                handler.ServerCertificateCustomValidationCallback =
+                    (request, cert, chain, errors) => validator(request, cert, chain, errors);
+            }
+
+            return handler;
         }
 
         /// <summary>
@@ -89,7 +119,7 @@ namespace LiveLink.Agent.A2A
                         }
                     }
 
-                    Debug.Log(string.Format("[LiveLink-A2A] Fetching agent card from {0}", cardUri));
+                    Log("Fetching agent card from {0}", cardUri);
 
                     HttpResponseMessage response = await client.GetAsync(cardUri).ConfigureAwait(false);
                     response.EnsureSuccessStatusCode();
@@ -97,8 +127,8 @@ namespace LiveLink.Agent.A2A
                     string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                     A2AAgentCard card = JsonSerializer.Deserialize<A2AAgentCard>(json, s_jsonOptions);
 
-                    Debug.Log(string.Format("[LiveLink-A2A] Discovered agent: {0} v{1}",
-                        card?.Name ?? "(unknown)", card?.Version ?? "(unknown)"));
+                    Log("Discovered agent: {0} v{1}",
+                        card?.Name ?? "(unknown)", card?.Version ?? "(unknown)");
 
                     return card;
                 }
@@ -132,8 +162,7 @@ namespace LiveLink.Agent.A2A
             string json = JsonSerializer.Serialize(request, s_jsonOptions);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            Debug.Log(string.Format("[LiveLink-A2A] Sending message to {0} ({1})",
-                _endpoint, message.MessageId));
+            Log("Sending message to {0} ({1})", _endpoint, message.MessageId);
 
             using (HttpRequestMessage httpRequest = BuildPostRequest(content))
             {
@@ -157,6 +186,7 @@ namespace LiveLink.Agent.A2A
 
         /// <summary>
         /// Send a streaming message. Chunks arrive via the callback as SSE events.
+        /// Automatically reconnects on connection drops (up to <see cref="MaxReconnectAttempts"/>).
         /// Returns the aggregated list of message chunks.
         /// </summary>
         public async Task<List<A2AMessage>> SendMessageStreamingAsync(
@@ -166,19 +196,95 @@ namespace LiveLink.Agent.A2A
         {
             ThrowIfDisposed();
 
-            var request = new A2ASendMessageRequest
+            string json = JsonSerializer.Serialize(new A2ASendMessageRequest
             {
                 Message = message,
                 Streaming = true
-            };
+            }, s_jsonOptions);
 
-            string json = JsonSerializer.Serialize(request, s_jsonOptions);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            Debug.Log(string.Format("[LiveLink-A2A] Sending streaming message to {0} ({1})",
-                _endpoint, message.MessageId));
+            Log("Sending streaming message to {0} ({1})", _endpoint, message.MessageId);
 
             var messages = new List<A2AMessage>();
+            int attempt = 0;
+
+            while (attempt <= MaxReconnectAttempts && !cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    bool connected = await ConnectAndReadStreamAsync(
+                        json, messages, onMessageChunk, cancellationToken).ConfigureAwait(false);
+
+                    if (connected)
+                    {
+                        // Stream completed normally (server sent complete event or closed).
+                        return messages;
+                    }
+
+                    // Connection dropped unexpectedly — attempt reconnect.
+                    attempt++;
+                    if (attempt <= MaxReconnectAttempts)
+                    {
+                        int delayMs = ReconnectBaseDelayMs * (1 << (attempt - 1)); // exponential backoff
+                        LogWarning("SSE connection dropped. Reconnecting in {0}ms (attempt {1}/{2})...",
+                            delayMs, attempt, MaxReconnectAttempts);
+
+                        await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // User cancelled — propagate immediately.
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    attempt++;
+                    if (attempt <= MaxReconnectAttempts)
+                    {
+                        int delayMs = ReconnectBaseDelayMs * (1 << (attempt - 1));
+                        LogWarning("SSE error: {0}. Reconnecting in {1}ms (attempt {2}/{3})...",
+                            ex.Message, delayMs, attempt, MaxReconnectAttempts);
+
+                        try
+                        {
+                            await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                    }
+                    else
+                    {
+                        LogError("SSE connection failed after {0} attempts: {1}", MaxReconnectAttempts + 1, ex.Message);
+                        throw;
+                    }
+                }
+            }
+
+            return messages;
+        }
+
+        public void Dispose()
+        {
+            if (_isDisposed) return;
+            _isDisposed = true;
+            _httpClient?.Dispose();
+        }
+
+        // ──────────────────────── private helpers ────────────────────────
+
+        /// <summary>
+        /// Single SSE connection attempt. Returns true if the stream completed normally,
+        /// false if the connection was dropped (caller should reconnect).
+        /// </summary>
+        private async Task<bool> ConnectAndReadStreamAsync(
+            string requestJson,
+            List<A2AMessage> messages,
+            Action<A2AMessage> onMessageChunk,
+            CancellationToken cancellationToken)
+        {
+            var content = new StringContent(requestJson, Encoding.UTF8, "application/json");
 
             using (HttpRequestMessage httpRequest = BuildPostRequest(content))
             {
@@ -211,7 +317,11 @@ namespace LiveLink.Agent.A2A
                                 break;
                             }
 
-                            if (line == null) break;
+                            if (line == null)
+                            {
+                                // Server closed the connection cleanly.
+                                return true;
+                            }
 
                             if (line.StartsWith("event: ", StringComparison.Ordinal))
                             {
@@ -226,9 +336,14 @@ namespace LiveLink.Agent.A2A
                             {
                                 // Blank line = end of SSE event. Join multi-line data with \n.
                                 string data = string.Join("\n", dataLines);
-                                ProcessSseEvent(eventType, data, messages, onMessageChunk);
+                                bool isComplete = ProcessSseEvent(eventType, data, messages, onMessageChunk);
                                 eventType = null;
                                 dataLines.Clear();
+
+                                if (isComplete)
+                                {
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -242,17 +357,9 @@ namespace LiveLink.Agent.A2A
                 }
             }
 
-            return messages;
+            // If we got here without cancellation, the connection was dropped.
+            return !cancellationToken.IsCancellationRequested;
         }
-
-        public void Dispose()
-        {
-            if (_isDisposed) return;
-            _isDisposed = true;
-            _httpClient?.Dispose();
-        }
-
-        // ──────────────────────── private helpers ────────────────────────
 
         private HttpRequestMessage BuildPostRequest(HttpContent content)
         {
@@ -267,13 +374,16 @@ namespace LiveLink.Agent.A2A
             return request;
         }
 
-        private static void ProcessSseEvent(
+        /// <summary>
+        /// Processes a single SSE event. Returns true if the event was a "complete" event.
+        /// </summary>
+        private static bool ProcessSseEvent(
             string eventType,
             string data,
             List<A2AMessage> messages,
             Action<A2AMessage> onMessageChunk)
         {
-            if (string.IsNullOrEmpty(data)) return;
+            if (string.IsNullOrEmpty(data)) return false;
 
             try
             {
@@ -288,21 +398,26 @@ namespace LiveLink.Agent.A2A
                         messages.Add(evt.Message);
                         onMessageChunk?.Invoke(evt.Message);
                     }
+
+                    return false;
                 }
                 else if (string.Equals(eventType, "complete", StringComparison.OrdinalIgnoreCase))
                 {
-                    Debug.Log("[LiveLink-A2A] Streaming complete");
+                    Log("Streaming complete");
+                    return true;
                 }
                 else if (string.Equals(eventType, "error", StringComparison.OrdinalIgnoreCase))
                 {
-                    Debug.LogError(string.Format("[LiveLink-A2A] Streaming error: {0}", data));
+                    LogError("Streaming error: {0}", data);
+                    return false;
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogWarning(string.Format(
-                    "[LiveLink-A2A] Failed to parse SSE event: {0}", ex.Message));
+                LogWarning("Failed to parse SSE event: {0}", ex.Message);
             }
+
+            return false;
         }
 
         private void ThrowIfDisposed()
@@ -311,6 +426,43 @@ namespace LiveLink.Agent.A2A
             {
                 throw new ObjectDisposedException(nameof(A2AClient));
             }
+        }
+
+        // ──────────────────────── Thread-safe logging ────────────────────────
+        // Unity's Debug.Log is NOT thread-safe on all platforms (especially Android IL2CPP).
+        // These helpers suppress logs from non-main threads to prevent crashes.
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        private static void Log(string format, params object[] args)
+        {
+            try
+            {
+                Debug.Log("[LiveLink-A2A] " + string.Format(format, args));
+            }
+            catch
+            {
+                // Swallow — logging should never break runtime behavior.
+            }
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        private static void LogWarning(string format, params object[] args)
+        {
+            try
+            {
+                Debug.LogWarning("[LiveLink-A2A] " + string.Format(format, args));
+            }
+            catch { }
+        }
+
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        private static void LogError(string format, params object[] args)
+        {
+            try
+            {
+                Debug.LogError("[LiveLink-A2A] " + string.Format(format, args));
+            }
+            catch { }
         }
     }
 }

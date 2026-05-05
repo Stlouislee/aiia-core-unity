@@ -1,0 +1,20 @@
+<linker>
+    <!-- Preserve System.Text.Json types used by A2A serialization to prevent IL2CPP stripping.
+         Without this, Deserialize<T> may fail at runtime when managed stripping is enabled. -->
+    <assembly fullname="System.Text.Json" preserve="all"/>
+
+    <!-- Preserve the specific A2A types that are serialized/deserialized via generics. -->
+    <assembly fullname="LiveLink.AgentRuntime">
+        <type fullname="LiveLink.Agent.A2A.A2AAgentCard" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2AMessage" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2APart" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2AFile" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2ASkill" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2ACapabilities" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2AInterface" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2ASendMessageRequest" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2ASendMessageResponse" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2AError" preserve="all"/>
+        <type fullname="LiveLink.Agent.A2A.A2AStreamingEvent" preserve="all"/>
+    </assembly>
+</linker>

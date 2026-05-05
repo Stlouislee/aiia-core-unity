@@ -36,6 +36,12 @@ namespace LiveLink.Agent.A2A
         [Tooltip("Prefix for the tool name exposed to the embedded agent. Result: {prefix}{sanitized_display_name}")]
         private string _delegateToolPrefix = "ask_";
 
+        [SerializeField]
+        [Tooltip("Accept self-signed or otherwise untrusted SSL certificates. " +
+                 "Enable for local dev / self-hosted agents with custom CAs. " +
+                 "Do NOT enable in production unless you trust the endpoint.")]
+        private bool _acceptSelfSignedCertificates;
+
         public bool Enabled => _enabled;
         public string DisplayName => _displayName;
         public string Endpoint => _endpoint;
@@ -44,6 +50,7 @@ namespace LiveLink.Agent.A2A
         public IReadOnlyList<AgentNamedValue> Headers => _headers;
         public bool EnableStreaming => _enableStreaming;
         public string DelegateToolPrefix => _delegateToolPrefix;
+        public bool AcceptSelfSignedCertificates => _acceptSelfSignedCertificates;
 
         /// <summary>
         /// Convert the serialized headers list to a dictionary for HttpClient.

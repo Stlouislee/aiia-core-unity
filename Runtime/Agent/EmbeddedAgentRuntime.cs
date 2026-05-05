@@ -384,11 +384,17 @@ namespace LiveLink.Agent
             Uri endpoint = new Uri(config.Endpoint);
             Dictionary<string, string> headers = config.GetHeadersDictionary();
 
+            // Create a custom handler that accepts self-signed certs if configured.
+            HttpMessageHandler certHandler = config.AcceptSelfSignedCertificates
+                ? A2AClient.CreateHandlerWithCertificateValidation((_, _, _, _) => true)
+                : null;
+
             A2AAgentCard card = null;
             if (config.UseAgentCardDiscovery)
             {
                 SetStatus(string.Format("Discovering A2A agent card: {0}...", config.DisplayName));
-                card = await A2AClient.GetAgentCardAsync(endpoint, headers, config.ConnectionTimeoutSeconds)
+                card = await A2AClient.GetAgentCardAsync(
+                        endpoint, headers, config.ConnectionTimeoutSeconds, certHandler)
                     .ConfigureAwait(false);
             }
 
@@ -408,7 +414,11 @@ namespace LiveLink.Agent
                 }
             }
 
-            var client = new A2AClient(agentEndpoint, headers, config.ConnectionTimeoutSeconds);
+            // Pass the cert handler to the client so it applies to all requests.
+            var client = certHandler != null
+                ? new A2AClient(agentEndpoint, certHandler, headers, config.ConnectionTimeoutSeconds)
+                : new A2AClient(agentEndpoint, headers, config.ConnectionTimeoutSeconds);
+
             try
             {
                 var tool = new A2AAgentToolWrapper(

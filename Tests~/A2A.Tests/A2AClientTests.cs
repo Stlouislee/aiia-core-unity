@@ -323,6 +323,73 @@ namespace A2A.Tests
                 () => client.SendMessageAsync(A2AMessage.CreateUserTextMessage("hi")));
         }
 
+        // ───────────────────── Reconnection ─────────────────────
+
+        [Fact]
+        public async Task SendMessageStreamingAsync_ConnectionDropped_ReconnectsAndCollectsAllChunks()
+        {
+            // Simulate: first request fails with 503, second request completes normally.
+            int callCount = 0;
+            string completeSse =
+                "event: message\n" +
+                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\"chunk1\"}]}}\n" +
+                "\n" +
+                "event: message\n" +
+                "data: {\"message\":{\"messageId\":\"r2\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\"chunk2\"}]}}\n" +
+                "\n" +
+                "event: complete\n" +
+                "data: {\"status\":\"completed\"}\n" +
+                "\n";
+
+            var handler = new MockHttpHandler(req =>
+            {
+                callCount++;
+                if (callCount == 1)
+                {
+                    // First attempt: server error (triggers reconnect).
+                    return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+                }
+                // Second attempt: success.
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(completeSse, Encoding.UTF8, "text/event-stream")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                List<A2AMessage> messages = await client.SendMessageStreamingAsync(
+                    A2AMessage.CreateUserTextMessage("reconnect test"));
+
+                Assert.Equal(2, messages.Count);
+                Assert.Equal("chunk1", messages[0].Parts[0].Text);
+                Assert.Equal("chunk2", messages[1].Parts[0].Text);
+                Assert.True(callCount >= 2, "Client should have reconnected at least once");
+            }
+        }
+
+        // ───────────────────── Certificate Validation ─────────────────────
+
+        [Fact]
+        public void CreateHandlerWithCertificateValidation_NullValidator_ReturnsDefaultHandler()
+        {
+            var handler = A2AClient.CreateHandlerWithCertificateValidation(null);
+            Assert.NotNull(handler);
+            handler.Dispose();
+        }
+
+        [Fact]
+        public void CreateHandlerWithCertificateValidation_WithValidator_SetsCallback()
+        {
+            var handler = A2AClient.CreateHandlerWithCertificateValidation(
+                (request, cert, chain, errors) => true);
+
+            Assert.NotNull(handler);
+            // We can't easily trigger the callback without a real TLS connection,
+            // but we verify the handler was created successfully.
+            handler.Dispose();
+        }
+
         // ───────────────────── Helpers ─────────────────────
 
         /// <summary>
