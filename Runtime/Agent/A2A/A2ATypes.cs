@@ -81,7 +81,8 @@ namespace LiveLink.Agent.A2A
         public string MessageId { get; set; } = Guid.NewGuid().ToString("N");
 
         [JsonPropertyName("role")]
-        public string Role { get; set; } = "user";
+        [JsonConverter(typeof(RoleJsonConverter))]
+        public string Role { get; set; } = "ROLE_USER";
 
         [JsonPropertyName("parts")]
         public List<A2APart> Parts { get; set; } = new List<A2APart>();
@@ -93,7 +94,7 @@ namespace LiveLink.Agent.A2A
         {
             return new A2AMessage
             {
-                Role = "user",
+                Role = "ROLE_USER",
                 Parts = new List<A2APart> { A2APart.FromText(text) }
             };
         }
@@ -102,45 +103,218 @@ namespace LiveLink.Agent.A2A
         {
             return new A2AMessage
             {
-                Role = "agent",
+                Role = "ROLE_AGENT",
                 Parts = new List<A2APart> { A2APart.FromText(text) }
             };
         }
     }
 
+    /// <summary>
+    /// A2A Part — uses v1.0 member-name discriminator pattern.
+    /// The JSON member name itself identifies the part type:
+    ///   - TextPart:  { "text": "..." }
+    ///   - FilePart:  { "raw": "base64...", "filename": "...", "mediaType": "..." }
+    ///              or { "url": "https://...", "filename": "...", "mediaType": "..." }
+    ///   - DataPart:  { "data": {...}, "mediaType": "application/json" }
+    /// </summary>
+    [JsonConverter(typeof(PartJsonConverter))]
     public class A2APart
     {
-        [JsonPropertyName("type")]
-        public string Type { get; set; } = "text";
+        /// <summary>
+        /// Discriminator indicating which content variant this part holds.
+        /// Not serialized to JSON — the JSON member name acts as the discriminator.
+        /// </summary>
+        public PartKind Kind { get; set; } = PartKind.Text;
 
-        [JsonPropertyName("text")]
+        /// <summary>
+        /// Text content (for TextPart).
+        /// </summary>
         public string Text { get; set; }
 
-        [JsonPropertyName("file")]
-        public A2AFile File { get; set; }
+        /// <summary>
+        /// Raw file bytes, base64-encoded in JSON (for FilePart with raw content).
+        /// </summary>
+        public byte[] Raw { get; set; }
 
-        [JsonPropertyName("data")]
+        /// <summary>
+        /// URL pointing to file content (for FilePart with URL reference).
+        /// </summary>
+        public string Url { get; set; }
+
+        /// <summary>
+        /// Structured data (for DataPart).
+        /// </summary>
         public Dictionary<string, object> Data { get; set; }
+
+        /// <summary>
+        /// Optional filename for file parts.
+        /// </summary>
+        public string Filename { get; set; }
+
+        /// <summary>
+        /// MIME type. Available for all part types.
+        /// </summary>
+        public string MediaType { get; set; }
 
         public static A2APart FromText(string text)
         {
-            return new A2APart { Type = "text", Text = text };
+            return new A2APart { Kind = PartKind.Text, Text = text };
+        }
+
+        public static A2APart FromRaw(byte[] raw, string filename = null, string mediaType = null)
+        {
+            return new A2APart { Kind = PartKind.File, Raw = raw, Filename = filename, MediaType = mediaType };
+        }
+
+        public static A2APart FromUrl(string url, string filename = null, string mediaType = null)
+        {
+            return new A2APart { Kind = PartKind.File, Url = url, Filename = filename, MediaType = mediaType };
+        }
+
+        public static A2APart FromData(Dictionary<string, object> data, string mediaType = null)
+        {
+            return new A2APart { Kind = PartKind.Data, Data = data, MediaType = mediaType };
         }
     }
 
-    public class A2AFile
+    public enum PartKind
     {
-        [JsonPropertyName("name")]
-        public string Name { get; set; }
+        Text,
+        File,
+        Data
+    }
 
-        [JsonPropertyName("mimeType")]
-        public string MimeType { get; set; }
+    // ───────────────────── Role Converter ─────────────────────
 
-        [JsonPropertyName("bytes")]
-        public string Bytes { get; set; }
+    /// <summary>
+    /// Handles A2A v1.0 SCREAMING_SNAKE_CASE role values.
+    /// Accepts both legacy ("user", "agent") and current ("ROLE_USER", "ROLE_AGENT") on read.
+    /// Always emits current form on write.
+    /// </summary>
+    internal sealed class RoleJsonConverter : JsonConverter<string>
+    {
+        public override string Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            string value = reader.GetString();
+            if (string.IsNullOrEmpty(value)) return value;
 
-        [JsonPropertyName("uri")]
-        public string Uri { get; set; }
+            // Accept legacy lowercase values for backward compatibility
+            switch (value)
+            {
+                case "user": return "ROLE_USER";
+                case "agent": return "ROLE_AGENT";
+                default: return value; // Already ROLE_USER / ROLE_AGENT / ROLE_UNSPECIFIED
+            }
+        }
+
+        public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+        {
+            writer.WriteStringValue(value);
+        }
+    }
+
+    // ───────────────────── Part Converter ─────────────────────
+
+    /// <summary>
+    /// Custom JSON converter for A2APart implementing the v1.0 member-name discriminator pattern.
+    /// No "type" field — the JSON member name itself (text/raw/url/data) identifies the part type.
+    /// </summary>
+    internal sealed class PartJsonConverter : JsonConverter<A2APart>
+    {
+        public override A2APart Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType != JsonTokenType.StartObject)
+                throw new JsonException("Expected StartObject token for Part");
+
+            var part = new A2APart();
+            string lastPropName = null;
+
+            while (reader.Read())
+            {
+                if (reader.TokenType == JsonTokenType.EndObject)
+                    break;
+
+                if (reader.TokenType == JsonTokenType.PropertyName)
+                {
+                    lastPropName = reader.GetString();
+                    reader.Read();
+
+                    switch (lastPropName)
+                    {
+                        case "text":
+                            part.Text = reader.GetString();
+                            part.Kind = PartKind.Text;
+                            break;
+                        case "raw":
+                            part.Raw = reader.GetBytesFromBase64();
+                            part.Kind = PartKind.File;
+                            break;
+                        case "url":
+                            part.Url = reader.GetString();
+                            part.Kind = PartKind.File;
+                            break;
+                        case "data":
+                            part.Data = JsonSerializer.Deserialize<Dictionary<string, object>>(ref reader, options);
+                            part.Kind = PartKind.Data;
+                            break;
+                        case "filename":
+                            part.Filename = reader.GetString();
+                            break;
+                        case "mediaType":
+                            part.MediaType = reader.GetString();
+                            break;
+                        default:
+                            reader.Skip();
+                            break;
+                    }
+                }
+            }
+
+            return part;
+        }
+
+        public override void Write(Utf8JsonWriter writer, A2APart value, JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+
+            switch (value.Kind)
+            {
+                case PartKind.Text:
+                    writer.WriteString("text", value.Text);
+                    break;
+
+                case PartKind.File:
+                    if (value.Raw != null)
+                    {
+                        writer.WriteString("raw", Convert.ToBase64String(value.Raw));
+                    }
+                    if (!string.IsNullOrEmpty(value.Url))
+                    {
+                        writer.WriteString("url", value.Url);
+                    }
+                    break;
+
+                case PartKind.Data:
+                    if (value.Data != null)
+                    {
+                        writer.WritePropertyName("data");
+                        JsonSerializer.Serialize(writer, value.Data, options);
+                    }
+                    break;
+            }
+
+            // Optional fields for file/data parts
+            if (!string.IsNullOrEmpty(value.Filename))
+            {
+                writer.WriteString("filename", value.Filename);
+            }
+            if (!string.IsNullOrEmpty(value.MediaType))
+            {
+                writer.WriteString("mediaType", value.MediaType);
+            }
+
+            writer.WriteEndObject();
+        }
     }
 
     // ───────────────────── JSON-RPC 2.0 Envelope Types ─────────────────────
@@ -197,7 +371,7 @@ namespace LiveLink.Agent.A2A
     }
 
     /// <summary>
-    /// Params for the "message/send" JSON-RPC method.
+    /// Params for the "SendMessage" JSON-RPC method.
     /// </summary>
     public class MessageSendParams
     {
@@ -206,7 +380,7 @@ namespace LiveLink.Agent.A2A
     }
 
     /// <summary>
-    /// Params for the "message/stream" JSON-RPC method.
+    /// Params for the "SendStreamingMessage" JSON-RPC method.
     /// </summary>
     public class MessageStreamParams
     {

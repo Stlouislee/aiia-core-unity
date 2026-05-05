@@ -24,8 +24,6 @@ namespace A2A.Tests
         {
             return new A2AHostConfig
             {
-                // Use reflection to set fields for testing since they're private.
-                // In real usage, these are set via Unity Inspector.
             };
         }
 
@@ -35,7 +33,6 @@ namespace A2A.Tests
         public void AgentCardBuilder_BuildsValidCard()
         {
             var config = new A2AHostConfig();
-            // Set fields via the serialized defaults.
             string json = A2AAgentCardBuilder.BuildCardJson(config, "https://my-agent.example.com");
 
             A2AAgentCard card = JsonSerializer.Deserialize<A2AAgentCard>(json, s_jsonOptions);
@@ -79,9 +76,9 @@ namespace A2A.Tests
         {
             A2AMessage msg = A2AMessage.CreateAgentTextMessage("I can help with that.");
 
-            Assert.Equal("agent", msg.Role);
+            Assert.Equal("ROLE_AGENT", msg.Role);
             Assert.Single(msg.Parts);
-            Assert.Equal("text", msg.Parts[0].Type);
+            Assert.Equal(PartKind.Text, msg.Parts[0].Kind);
             Assert.Equal("I can help with that.", msg.Parts[0].Text);
         }
 
@@ -90,7 +87,7 @@ namespace A2A.Tests
         [Fact]
         public async Task HostServer_StartsAndServesHealthCheck()
         {
-            var config = CreateTestConfigWithPort(0); // port 0 = auto-assign
+            var config = CreateTestConfigWithPort(0);
             
 
             var server = new A2AHostServer(config, (msg, ct) => Task.FromResult("echo: " + msg));
@@ -101,7 +98,6 @@ namespace A2A.Tests
                 Assert.True(server.IsRunning);
                 int port = server.Port;
 
-                // Health check
                 using (var client = new HttpClient())
                 {
                     HttpResponseMessage response = await client.GetAsync($"http://localhost:{port}/health");
@@ -165,7 +161,7 @@ namespace A2A.Tests
 
                 var rpcRequest = new JsonRpcRequest
                 {
-                    Method = "message/send",
+                    Method = "SendMessage",
                     Id = "test-req-1",
                     Params = new MessageSendParams { Message = A2AMessage.CreateUserTextMessage("Hello agent!") }
                 };
@@ -190,7 +186,7 @@ namespace A2A.Tests
                     Assert.True(result.Result.HasValue);
 
                     A2AMessage msg = result.Result.Value.Deserialize<A2AMessage>(s_jsonOptions);
-                    Assert.Equal("agent", msg.Role);
+                    Assert.Equal("ROLE_AGENT", msg.Role);
                     Assert.Equal("You said: Hello agent!", msg.Parts[0].Text);
                 }
             }
@@ -218,14 +214,13 @@ namespace A2A.Tests
                     HttpResponseMessage response = await client.PostAsync(
                         $"http://localhost:{port}/a2a", content);
 
-                    // Server returns 200 with JSON-RPC error (per JSON-RPC 2.0 spec)
                     string body = await response.Content.ReadAsStringAsync();
                     JsonRpcResponse result = JsonSerializer.Deserialize<JsonRpcResponse>(body, s_jsonOptions);
 
                     Assert.NotNull(result);
                     Assert.Equal("2.0", result.JsonRpc);
                     Assert.NotNull(result.Error);
-                    Assert.Equal(-32700, result.Error.Code); // Parse error
+                    Assert.Equal(-32700, result.Error.Code);
                 }
             }
             finally
@@ -273,7 +268,6 @@ namespace A2A.Tests
 
                 using (var client = new HttpClient())
                 {
-                    // No auth header → 401
                     HttpResponseMessage response = await client.GetAsync(
                         $"http://localhost:{port}/health");
                     Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
@@ -327,7 +321,7 @@ namespace A2A.Tests
 
                 var rpcRequest = new JsonRpcRequest
                 {
-                    Method = "message/stream",
+                    Method = "SendStreamingMessage",
                     Id = "stream-req-1",
                     Params = new MessageStreamParams { Message = A2AMessage.CreateUserTextMessage("stream test") }
                 };
@@ -345,8 +339,49 @@ namespace A2A.Tests
                     Assert.Contains("event: message", body);
                     Assert.Contains("streaming response", body);
                     Assert.Contains("event: complete", body);
-                    // SSE message data should be JSON-RPC 2.0 response
                     Assert.Contains("\"jsonrpc\":\"2.0\"", body);
+                }
+            }
+            finally
+            {
+                server.Dispose();
+            }
+        }
+
+        [Fact]
+        public async Task HostServer_RejectsUnknownMethod()
+        {
+            var config = CreateTestConfigWithPort(0);
+
+            var server = new A2AHostServer(config, (msg, ct) => Task.FromResult("ok"));
+
+            try
+            {
+                server.Start();
+                int port = server.Port;
+
+                var rpcRequest = new JsonRpcRequest
+                {
+                    Method = "UnknownMethod",
+                    Id = "test-unknown",
+                    Params = new { }
+                };
+
+                string requestJson = JsonSerializer.Serialize(rpcRequest, s_jsonOptions);
+
+                using (var client = new HttpClient())
+                {
+                    var content = new StringContent(requestJson, Encoding.UTF8, "application/json");
+                    HttpResponseMessage response = await client.PostAsync(
+                        $"http://localhost:{port}/a2a", content);
+
+                    string body = await response.Content.ReadAsStringAsync();
+                    JsonRpcResponse result = JsonSerializer.Deserialize<JsonRpcResponse>(body, s_jsonOptions);
+
+                    Assert.NotNull(result);
+                    Assert.Equal("2.0", result.JsonRpc);
+                    Assert.NotNull(result.Error);
+                    Assert.Equal(-32601, result.Error.Code); // Method not found
                 }
             }
             finally
@@ -359,9 +394,6 @@ namespace A2A.Tests
 
         private static A2AHostConfig CreateTestConfigWithPort(int port, string authToken = null)
         {
-            // A2AHostConfig uses private [SerializeField] fields, so we use a helper
-            // that constructs via the public API path (Unity serialization).
-            // For tests, we create a minimal config.
             var config = new A2AHostConfig();
             SetPort(config, port);
             if (authToken != null)

@@ -75,7 +75,7 @@ namespace A2A.Tests
             var resultMessage = new A2AMessage
             {
                 MessageId = "resp-1",
-                Role = "agent",
+                Role = "ROLE_AGENT",
                 Parts = new List<A2APart> { A2APart.FromText("Hello from agent!") }
             };
 
@@ -101,7 +101,7 @@ namespace A2A.Tests
                     A2AMessage.CreateUserTextMessage("Hi!"));
 
                 Assert.NotNull(response);
-                Assert.Equal("agent", response.Role);
+                Assert.Equal("ROLE_AGENT", response.Role);
                 Assert.Equal("Hello from agent!", response.Parts[0].Text);
             }
         }
@@ -172,9 +172,9 @@ namespace A2A.Tests
             Assert.NotNull(capturedBody);
             using (JsonDocument doc = JsonDocument.Parse(capturedBody))
             {
-                // Must be JSON-RPC 2.0 format
+                // Must be JSON-RPC 2.0 format with PascalCase method name
                 Assert.Equal("2.0", doc.RootElement.GetProperty("jsonrpc").GetString());
-                Assert.Equal("message/send", doc.RootElement.GetProperty("method").GetString());
+                Assert.Equal("SendMessage", doc.RootElement.GetProperty("method").GetString());
                 Assert.True(doc.RootElement.TryGetProperty("id", out _));
 
                 string text = doc.RootElement
@@ -227,13 +227,12 @@ namespace A2A.Tests
         [Fact]
         public async Task SendMessageStreamingAsync_ReceivesChunks()
         {
-            // SSE events now contain JSON-RPC 2.0 responses
             string chunk1Json = JsonSerializer.Serialize(new JsonRpcResponse
             {
                 Id = "stream-req",
                 Result = JsonSerializer.SerializeToElement(new A2AMessage
                 {
-                    MessageId = "r1", Role = "agent",
+                    MessageId = "r1", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText("Hello") }
                 }, s_jsonOptions)
             }, s_jsonOptions);
@@ -243,7 +242,7 @@ namespace A2A.Tests
                 Id = "stream-req",
                 Result = JsonSerializer.SerializeToElement(new A2AMessage
                 {
-                    MessageId = "r1", Role = "agent",
+                    MessageId = "r1", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText(" World") }
                 }, s_jsonOptions)
             }, s_jsonOptions);
@@ -280,7 +279,7 @@ namespace A2A.Tests
                         {
                             foreach (var part in chunk.Parts)
                             {
-                                if (part.Type == "text") chunks.Add(part.Text);
+                                if (part.Kind == PartKind.Text) chunks.Add(part.Text);
                             }
                         }
                     });
@@ -315,11 +314,9 @@ namespace A2A.Tests
         [Fact]
         public async Task SendMessageStreamingAsync_MultiLineData_JoinsWithNewline()
         {
-            // SSE spec: multiple "data:" lines in one event should be joined with \n.
-            // The joined result must be valid JSON-RPC 2.0 response.
             var resultMsg = new A2AMessage
             {
-                MessageId = "r1", Role = "agent",
+                MessageId = "r1", Role = "ROLE_AGENT",
                 Parts = new List<A2APart> { A2APart.FromText("hello world") }
             };
             string rpcJson = JsonSerializer.Serialize(new JsonRpcResponse
@@ -328,7 +325,6 @@ namespace A2A.Tests
                 Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
             }, s_jsonOptions);
 
-            // Split the JSON at a natural boundary (after "2.0",)
             int splitPoint = rpcJson.IndexOf("\"id\"");
             string part1 = rpcJson.Substring(0, splitPoint);
             string part2 = rpcJson.Substring(splitPoint);
@@ -378,7 +374,6 @@ namespace A2A.Tests
         [Fact]
         public async Task SendMessageStreamingAsync_ConnectionDropped_ReconnectsAndCollectsAllChunks()
         {
-            // Simulate: first request fails with 503, second request completes normally.
             int callCount = 0;
 
             string chunk1Json = JsonSerializer.Serialize(new JsonRpcResponse
@@ -386,7 +381,7 @@ namespace A2A.Tests
                 Id = "reconnect",
                 Result = JsonSerializer.SerializeToElement(new A2AMessage
                 {
-                    MessageId = "r1", Role = "agent",
+                    MessageId = "r1", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText("chunk1") }
                 }, s_jsonOptions)
             }, s_jsonOptions);
@@ -396,7 +391,7 @@ namespace A2A.Tests
                 Id = "reconnect",
                 Result = JsonSerializer.SerializeToElement(new A2AMessage
                 {
-                    MessageId = "r2", Role = "agent",
+                    MessageId = "r2", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText("chunk2") }
                 }, s_jsonOptions)
             }, s_jsonOptions);
@@ -417,10 +412,8 @@ namespace A2A.Tests
                 callCount++;
                 if (callCount == 1)
                 {
-                    // First attempt: server error (triggers reconnect).
                     return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
                 }
-                // Second attempt: success.
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent(completeSse, Encoding.UTF8, "text/event-stream")
@@ -456,17 +449,11 @@ namespace A2A.Tests
                 (request, cert, chain, errors) => true);
 
             Assert.NotNull(handler);
-            // We can't easily trigger the callback without a real TLS connection,
-            // but we verify the handler was created successfully.
             handler.Dispose();
         }
 
         // ───────────────────── Helpers ─────────────────────
 
-        /// <summary>
-        /// Minimal mock HTTP handler. Routes all requests through a user-supplied function.
-        /// Also exposes a static overload for GetAgentCardAsync which needs a handler parameter.
-        /// </summary>
         private class MockHttpHandler : HttpMessageHandler
         {
             private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
@@ -484,8 +471,6 @@ namespace A2A.Tests
         }
     }
 
-    // Extension to let GetAgentCardAsync accept a handler for testability.
-    // Now that the real method accepts an optional handler, this simply forwards.
     internal static class A2AClientTestExtensions
     {
         public static Task<A2AAgentCard> GetAgentCardAsync(

@@ -57,7 +57,6 @@ namespace A2A.Tests
         [Fact]
         public void AgentCard_DeserializesFromRealWorldJson()
         {
-            // Simulates a real agent card response.
             string json = @"{
                 ""name"": ""OpenClaw Agent"",
                 ""description"": ""A helpful AI assistant"",
@@ -102,10 +101,10 @@ namespace A2A.Tests
         {
             A2AMessage msg = A2AMessage.CreateUserTextMessage("Hello, agent!");
 
-            Assert.Equal("user", msg.Role);
+            Assert.Equal("ROLE_USER", msg.Role);
             Assert.NotNull(msg.MessageId);
             Assert.Single(msg.Parts);
-            Assert.Equal("text", msg.Parts[0].Type);
+            Assert.Equal(PartKind.Text, msg.Parts[0].Kind);
             Assert.Equal("Hello, agent!", msg.Parts[0].Text);
         }
 
@@ -115,11 +114,11 @@ namespace A2A.Tests
             var msg = new A2AMessage
             {
                 MessageId = "test-123",
-                Role = "agent",
+                Role = "ROLE_AGENT",
                 Parts = new List<A2APart>
                 {
                     A2APart.FromText("Sure, I can help with that."),
-                    new A2APart { Type = "data", Data = new Dictionary<string, object> { ["key"] = "value" } }
+                    A2APart.FromData(new Dictionary<string, object> { ["key"] = "value" })
                 },
                 TaskId = "task-abc"
             };
@@ -128,11 +127,11 @@ namespace A2A.Tests
             A2AMessage deserialized = JsonSerializer.Deserialize<A2AMessage>(json, s_options);
 
             Assert.Equal("test-123", deserialized.MessageId);
-            Assert.Equal("agent", deserialized.Role);
+            Assert.Equal("ROLE_AGENT", deserialized.Role);
             Assert.Equal(2, deserialized.Parts.Count);
-            Assert.Equal("text", deserialized.Parts[0].Type);
+            Assert.Equal(PartKind.Text, deserialized.Parts[0].Kind);
             Assert.Equal("Sure, I can help with that.", deserialized.Parts[0].Text);
-            Assert.Equal("data", deserialized.Parts[1].Type);
+            Assert.Equal(PartKind.Data, deserialized.Parts[1].Kind);
             Assert.Equal("task-abc", deserialized.TaskId);
         }
 
@@ -141,10 +140,145 @@ namespace A2A.Tests
         {
             A2APart part = A2APart.FromText("hello");
 
-            Assert.Equal("text", part.Type);
+            Assert.Equal(PartKind.Text, part.Kind);
             Assert.Equal("hello", part.Text);
-            Assert.Null(part.File);
+            Assert.Null(part.Raw);
             Assert.Null(part.Data);
+        }
+
+        // ───────────────────── Part v1.0 Member-Name Discriminator ─────────────────────
+
+        [Fact]
+        public void Part_TextPart_SerializesWithoutTypeField()
+        {
+            var part = A2APart.FromText("Hello, world!");
+            string json = JsonSerializer.Serialize(part, s_options);
+
+            // Must NOT contain "type" field
+            Assert.DoesNotContain("\"type\"", json);
+            // Must contain "text" as the discriminator member
+            Assert.Contains("\"text\":\"Hello, world!\"", json);
+        }
+
+        [Fact]
+        public void Part_TextPart_RoundTrip()
+        {
+            var part = A2APart.FromText("test content");
+            string json = JsonSerializer.Serialize(part, s_options);
+            A2APart deserialized = JsonSerializer.Deserialize<A2APart>(json, s_options);
+
+            Assert.Equal(PartKind.Text, deserialized.Kind);
+            Assert.Equal("test content", deserialized.Text);
+        }
+
+        [Fact]
+        public void Part_FilePart_WithRaw_RoundTrip()
+        {
+            byte[] raw = new byte[] { 0x48, 0x65, 0x6C, 0x6C, 0x6F }; // "Hello"
+            var part = A2APart.FromRaw(raw, "test.txt", "text/plain");
+            string json = JsonSerializer.Serialize(part, s_options);
+
+            Assert.DoesNotContain("\"type\"", json);
+            Assert.Contains("\"raw\"", json);
+            Assert.Contains("\"filename\":\"test.txt\"", json);
+            Assert.Contains("\"mediaType\":\"text/plain\"", json);
+
+            A2APart deserialized = JsonSerializer.Deserialize<A2APart>(json, s_options);
+            Assert.Equal(PartKind.File, deserialized.Kind);
+            Assert.Equal(raw, deserialized.Raw);
+            Assert.Equal("test.txt", deserialized.Filename);
+            Assert.Equal("text/plain", deserialized.MediaType);
+        }
+
+        [Fact]
+        public void Part_FilePart_WithUrl_RoundTrip()
+        {
+            var part = A2APart.FromUrl("https://example.com/image.png", "image.png", "image/png");
+            string json = JsonSerializer.Serialize(part, s_options);
+
+            Assert.DoesNotContain("\"type\"", json);
+            Assert.Contains("\"url\":\"https://example.com/image.png\"", json);
+            Assert.Contains("\"filename\":\"image.png\"", json);
+
+            A2APart deserialized = JsonSerializer.Deserialize<A2APart>(json, s_options);
+            Assert.Equal(PartKind.File, deserialized.Kind);
+            Assert.Equal("https://example.com/image.png", deserialized.Url);
+            Assert.Equal("image.png", deserialized.Filename);
+        }
+
+        [Fact]
+        public void Part_DataPart_RoundTrip()
+        {
+            var data = new Dictionary<string, object>
+            {
+                ["name"] = "test",
+                ["count"] = 42
+            };
+            var part = A2APart.FromData(data, "application/json");
+            string json = JsonSerializer.Serialize(part, s_options);
+
+            Assert.DoesNotContain("\"type\"", json);
+            Assert.Contains("\"data\"", json);
+            Assert.Contains("\"mediaType\":\"application/json\"", json);
+
+            A2APart deserialized = JsonSerializer.Deserialize<A2APart>(json, s_options);
+            Assert.Equal(PartKind.Data, deserialized.Kind);
+            Assert.NotNull(deserialized.Data);
+            Assert.Equal("application/json", deserialized.MediaType);
+        }
+
+        [Fact]
+        public void Part_DeserializesV10JsonWithoutTypeField()
+        {
+            // v1.0 format: no "type" field, member name is the discriminator
+            string textJson = @"{ ""text"": ""Hello from v1.0"" }";
+            A2APart textPart = JsonSerializer.Deserialize<A2APart>(textJson, s_options);
+            Assert.Equal(PartKind.Text, textPart.Kind);
+            Assert.Equal("Hello from v1.0", textPart.Text);
+
+            string dataJson = @"{ ""data"": { ""key"": ""value"" }, ""mediaType"": ""application/json"" }";
+            A2APart dataPart = JsonSerializer.Deserialize<A2APart>(dataJson, s_options);
+            Assert.Equal(PartKind.Data, dataPart.Kind);
+            Assert.NotNull(dataPart.Data);
+        }
+
+        // ───────────────────── Role v1.0 SCREAMING_SNAKE_CASE ─────────────────────
+
+        [Fact]
+        public void Role_SerializesAsScreamingSnakeCase()
+        {
+            var msg = A2AMessage.CreateUserTextMessage("hi");
+            string json = JsonSerializer.Serialize(msg, s_options);
+            Assert.Contains("\"ROLE_USER\"", json);
+            Assert.DoesNotContain("\"user\"", json);
+
+            var agentMsg = A2AMessage.CreateAgentTextMessage("hello");
+            string agentJson = JsonSerializer.Serialize(agentMsg, s_options);
+            Assert.Contains("\"ROLE_AGENT\"", agentJson);
+        }
+
+        [Fact]
+        public void Role_DeserializesLegacyUser()
+        {
+            string json = @"{ ""messageId"": ""m1"", ""role"": ""user"", ""parts"": [{ ""text"": ""hi"" }] }";
+            A2AMessage msg = JsonSerializer.Deserialize<A2AMessage>(json, s_options);
+            Assert.Equal("ROLE_USER", msg.Role);
+        }
+
+        [Fact]
+        public void Role_DeserializesLegacyAgent()
+        {
+            string json = @"{ ""messageId"": ""m1"", ""role"": ""agent"", ""parts"": [{ ""text"": ""hi"" }] }";
+            A2AMessage msg = JsonSerializer.Deserialize<A2AMessage>(json, s_options);
+            Assert.Equal("ROLE_AGENT", msg.Role);
+        }
+
+        [Fact]
+        public void Role_DeserializesV10Format()
+        {
+            string json = @"{ ""messageId"": ""m1"", ""role"": ""ROLE_USER"", ""parts"": [{ ""text"": ""hi"" }] }";
+            A2AMessage msg = JsonSerializer.Deserialize<A2AMessage>(json, s_options);
+            Assert.Equal("ROLE_USER", msg.Role);
         }
 
         // ───────────────────── Request / Response ─────────────────────
@@ -186,8 +320,8 @@ namespace A2A.Tests
             string json = @"{
                 ""message"": {
                     ""messageId"": ""r1"",
-                    ""role"": ""agent"",
-                    ""parts"": [{ ""type"": ""text"", ""text"": ""Done!"" }]
+                    ""role"": ""ROLE_AGENT"",
+                    ""parts"": [{ ""text"": ""Done!"" }]
                 }
             }";
 
@@ -205,7 +339,7 @@ namespace A2A.Tests
         {
             var req = new JsonRpcRequest
             {
-                Method = "message/send",
+                Method = "SendMessage",
                 Id = "req-1",
                 Params = new MessageSendParams { Message = A2AMessage.CreateUserTextMessage("hello") }
             };
@@ -214,7 +348,7 @@ namespace A2A.Tests
             JsonRpcRequest deserialized = JsonSerializer.Deserialize<JsonRpcRequest>(json, s_options);
 
             Assert.Equal("2.0", deserialized.JsonRpc);
-            Assert.Equal("message/send", deserialized.Method);
+            Assert.Equal("SendMessage", deserialized.Method);
             Assert.Equal("req-1", deserialized.Id);
             Assert.NotNull(deserialized.Params);
         }
@@ -224,7 +358,7 @@ namespace A2A.Tests
         {
             var req = new JsonRpcRequest
             {
-                Method = "message/send",
+                Method = "SendMessage",
                 Id = "abc-123",
                 Params = new MessageSendParams { Message = A2AMessage.CreateUserTextMessage("test") }
             };
@@ -232,7 +366,7 @@ namespace A2A.Tests
             string json = JsonSerializer.Serialize(req, s_options);
 
             Assert.Contains("\"jsonrpc\":\"2.0\"", json);
-            Assert.Contains("\"method\":\"message/send\"", json);
+            Assert.Contains("\"method\":\"SendMessage\"", json);
             Assert.Contains("\"id\":\"abc-123\"", json);
             Assert.Contains("\"params\":", json);
         }
@@ -264,8 +398,8 @@ namespace A2A.Tests
                 ""id"": ""req-1"",
                 ""result"": {
                     ""messageId"": ""r1"",
-                    ""role"": ""agent"",
-                    ""parts"": [{ ""type"": ""text"", ""text"": ""Done!"" }]
+                    ""role"": ""ROLE_AGENT"",
+                    ""parts"": [{ ""text"": ""Done!"" }]
                 }
             }";
 
@@ -308,8 +442,8 @@ namespace A2A.Tests
             string json = @"{
                 ""message"": {
                     ""messageId"": ""chunk1"",
-                    ""role"": ""agent"",
-                    ""parts"": [{ ""type"": ""text"", ""text"": ""partial..."" }]
+                    ""role"": ""ROLE_AGENT"",
+                    ""parts"": [{ ""text"": ""partial..."" }]
                 }
             }";
 

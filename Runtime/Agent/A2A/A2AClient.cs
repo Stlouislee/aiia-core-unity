@@ -155,7 +155,7 @@ namespace LiveLink.Agent.A2A
 
             var rpcRequest = new JsonRpcRequest
             {
-                Method = "message/send",
+                Method = "SendMessage",
                 Id = Guid.NewGuid().ToString("N"),
                 Params = new MessageSendParams { Message = message }
             };
@@ -205,7 +205,7 @@ namespace LiveLink.Agent.A2A
 
             var rpcRequest = new JsonRpcRequest
             {
-                Method = "message/stream",
+                Method = "SendStreamingMessage",
                 Id = Guid.NewGuid().ToString("N"),
                 Params = new MessageStreamParams { Message = message }
             };

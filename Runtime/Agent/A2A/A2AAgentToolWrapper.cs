@@ -148,8 +148,7 @@ namespace LiveLink.Agent.A2A
             for (int i = 0; i < message.Parts.Count; i++)
             {
                 A2APart part = message.Parts[i];
-                if (string.Equals(part.Type, "text", StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrEmpty(part.Text))
+                if (part.Kind == PartKind.Text && !string.IsNullOrEmpty(part.Text))
                 {
                     sb.Append(part.Text);
                 }

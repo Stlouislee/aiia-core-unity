@@ -127,7 +127,7 @@ namespace A2A.Tests
         {
             var resultMsg = new A2AMessage
             {
-                Role = "agent",
+                Role = "ROLE_AGENT",
                 Parts = new List<A2APart> { A2APart.FromText("42") }
             };
             string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
@@ -243,7 +243,7 @@ namespace A2A.Tests
                 Id = "stream",
                 Result = JsonSerializer.SerializeToElement(new A2AMessage
                 {
-                    MessageId = "r1", Role = "agent",
+                    MessageId = "r1", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText("chunk1") }
                 }, s_jsonOptions)
             }, s_jsonOptions);
@@ -253,7 +253,7 @@ namespace A2A.Tests
                 Id = "stream",
                 Result = JsonSerializer.SerializeToElement(new A2AMessage
                 {
-                    MessageId = "r1", Role = "agent",
+                    MessageId = "r1", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText("chunk2") }
                 }, s_jsonOptions)
             }, s_jsonOptions);
@@ -298,7 +298,7 @@ namespace A2A.Tests
         {
             var resultMsg = new A2AMessage
             {
-                Role = "agent",
+                Role = "ROLE_AGENT",
                 Parts = new List<A2APart>
                 {
                     A2APart.FromText("Part 1. "),

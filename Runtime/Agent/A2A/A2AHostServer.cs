@@ -249,11 +249,11 @@ namespace LiveLink.Agent.A2A
             // Route by JSON-RPC method
             switch (rpcRequest.Method)
             {
-                case "message/send":
+                case "SendMessage":
                     await HandleJsonRpcSendMessageAsync(rpcRequest, stream, ct);
                     break;
 
-                case "message/stream":
+                case "SendStreamingMessage":
                     await HandleJsonRpcStreamMessageAsync(rpcRequest, stream, ct);
                     break;
 
@@ -362,7 +362,7 @@ namespace LiveLink.Agent.A2A
 
                 var sseMessage = new A2AMessage
                 {
-                    Role = "agent",
+                    Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText(agentResponse) }
                 };
 
@@ -607,8 +607,7 @@ namespace LiveLink.Agent.A2A
             for (int i = 0; i < message.Parts.Count; i++)
             {
                 A2APart part = message.Parts[i];
-                if (string.Equals(part.Type, "text", StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrEmpty(part.Text))
+                if (part.Kind == PartKind.Text && !string.IsNullOrEmpty(part.Text))
                 {
                     sb.Append(part.Text);
                 }
