@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <Nullable>disable</Nullable>
+    <RootNamespace>A2A.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit" Version="2.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="9.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Link actual source files so we test the real code -->
+    <Compile Include="../../Runtime/Agent/A2A/A2ATypes.cs" Link="Src/A2ATypes.cs" />
+    <Compile Include="../../Runtime/Agent/A2A/A2AClient.cs" Link="Src/A2AClient.cs" />
+    <Compile Include="../../Runtime/Agent/A2A/AgentA2ARemoteConfig.cs" Link="Src/AgentA2ARemoteConfig.cs" />
+    <Compile Include="../../Runtime/Agent/A2A/A2AAgentToolWrapper.cs" Link="Src/A2AAgentToolWrapper.cs" />
+    <Compile Include="../../Runtime/Agent/AgentNamedValue.cs" Link="Src/AgentNamedValue.cs" />
+  </ItemGroup>
+
+</Project>

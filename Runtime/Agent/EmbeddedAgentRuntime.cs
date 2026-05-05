@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using LiveLink.Agent.A2A;
 using ModelContextProtocol.Client;
 using OpenAI;
 using UnityEngine;
@@ -70,6 +71,7 @@ namespace LiveLink.Agent
         private readonly SemaphoreSlim _initializationLock = new SemaphoreSlim(1, 1);
         private readonly SemaphoreSlim _runLock = new SemaphoreSlim(1, 1);
         private readonly List<ConnectedMcpServer> _connectedServers = new List<ConnectedMcpServer>();
+        private readonly List<ConnectedA2AAgent> _connectedA2AAgents = new List<ConnectedA2AAgent>();
         private readonly List<string> _availableToolNames = new List<string>();
 
         private AIAgent _agent;
@@ -90,6 +92,14 @@ namespace LiveLink.Agent
             public string ServerInstructions;
             public string ServerName;
             public string ServerVersion;
+        }
+
+        private sealed class ConnectedA2AAgent
+        {
+            public string DisplayName;
+            public A2AClient Client;
+            public A2AAgentCard AgentCard;
+            public A2AAgentToolWrapper Tool;
         }
 
         public AgentRuntimeConfig Config => _config;
@@ -200,6 +210,33 @@ namespace LiveLink.Agent
                     }
                 }
 
+                // Connect to remote A2A agents (OpenClaw, Hermes, etc.)
+                if (_config.RemoteA2AAgents != null)
+                {
+                    for (int i = 0; i < _config.RemoteA2AAgents.Count; i++)
+                    {
+                        AgentA2ARemoteConfig a2aConfig = _config.RemoteA2AAgents[i];
+                        if (a2aConfig == null || !a2aConfig.Enabled)
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            SetStatus(string.Format("Connecting A2A agent: {0}...", a2aConfig.DisplayName));
+                            ConnectedA2AAgent connected = await ConnectA2AAgentAsync(a2aConfig, cancellationToken)
+                                .ConfigureAwait(false);
+                            _connectedA2AAgents.Add(connected);
+                            SetStatus(string.Format("Connected A2A agent: {0}", a2aConfig.DisplayName));
+                        }
+                        catch (Exception ex)
+                        {
+                            warnings.Add(string.Format("Failed to connect A2A agent '{0}': {1}",
+                                a2aConfig.DisplayName, ex.Message));
+                        }
+                    }
+                }
+
                 SetStatus("Preparing agent tools...");
                 List<AITool> tools = BuildToolList(warnings);
                 string instructions = BuildInstructions(warnings);
@@ -244,7 +281,8 @@ namespace LiveLink.Agent
                 }
 
                 _isInitialized = true;
-                SetStatus(string.Format("Ready. Connected {0} MCP server(s).", _connectedServers.Count));
+                SetStatus(string.Format("Ready. Connected {0} MCP server(s), {1} A2A agent(s).",
+                    _connectedServers.Count, _connectedA2AAgents.Count));
             }
             catch (Exception ex)
             {
@@ -339,6 +377,39 @@ namespace LiveLink.Agent
             _availableToolNames.Clear();
             await DisposeConnectionsAsync().ConfigureAwait(false);
             SetStatus("Stopped.");
+        }
+
+        private async Task<ConnectedA2AAgent> ConnectA2AAgentAsync(AgentA2ARemoteConfig config, CancellationToken cancellationToken)
+        {
+            Uri endpoint = new Uri(config.Endpoint);
+            Dictionary<string, string> headers = config.GetHeadersDictionary();
+
+            A2AAgentCard card = null;
+            if (config.UseAgentCardDiscovery)
+            {
+                SetStatus(string.Format("Discovering A2A agent card: {0}...", config.DisplayName));
+                card = await A2AClient.GetAgentCardAsync(endpoint, headers, config.ConnectionTimeoutSeconds)
+                    .ConfigureAwait(false);
+            }
+
+            // If agent card exposes a specific endpoint URL, use it.
+            Uri agentEndpoint = endpoint;
+            if (card?.SupportedInterfaces != null && card.SupportedInterfaces.Count > 0)
+            {
+                agentEndpoint = new Uri(card.SupportedInterfaces[0].Url);
+            }
+
+            var client = new A2AClient(agentEndpoint, headers, config.ConnectionTimeoutSeconds);
+            var tool = new A2AAgentToolWrapper(
+                config.DisplayName, client, card, config.EnableStreaming, EmitToolCall);
+
+            return new ConnectedA2AAgent
+            {
+                DisplayName = config.DisplayName,
+                Client = client,
+                AgentCard = card,
+                Tool = tool
+            };
         }
 
         private async Task<ConnectedMcpServer> ConnectLocalLiveLinkServerAsync(CancellationToken cancellationToken)
@@ -448,6 +519,23 @@ namespace LiveLink.Agent
                 }
             }
 
+            // Add A2A remote agent tools.
+            for (int i = 0; i < _connectedA2AAgents.Count; i++)
+            {
+                ConnectedA2AAgent agent = _connectedA2AAgents[i];
+                if (agent.Tool != null && seenNames.Add(agent.Tool.Name))
+                {
+                    tools.Add(agent.Tool);
+                    _availableToolNames.Add(agent.Tool.Name);
+                }
+                else if (agent.Tool != null)
+                {
+                    warnings.Add(string.Format(
+                        "Skipped duplicate A2A tool '{0}' from agent '{1}'.",
+                        agent.Tool.Name, agent.DisplayName));
+                }
+            }
+
             _availableToolNames.Sort(StringComparer.OrdinalIgnoreCase);
             return tools;
         }
@@ -497,6 +585,57 @@ namespace LiveLink.Agent
                     if (!string.IsNullOrWhiteSpace(server.ServerInstructions))
                     {
                         builder.AppendLine(server.ServerInstructions.Trim());
+                    }
+                }
+
+                builder.AppendLine();
+            }
+
+            if (_connectedA2AAgents.Count > 0)
+            {
+                builder.AppendLine("Connected remote A2A agents (use their delegate tools to ask questions or assign tasks):");
+                for (int i = 0; i < _connectedA2AAgents.Count; i++)
+                {
+                    ConnectedA2AAgent agent = _connectedA2AAgents[i];
+                    builder.Append("- ");
+                    builder.Append(agent.DisplayName);
+                    if (agent.AgentCard != null)
+                    {
+                        if (!string.IsNullOrWhiteSpace(agent.AgentCard.Version))
+                        {
+                            builder.Append(" v");
+                            builder.Append(agent.AgentCard.Version);
+                        }
+                        if (!string.IsNullOrWhiteSpace(agent.AgentCard.Description))
+                        {
+                            builder.Append(" — ");
+                            builder.AppendLine(agent.AgentCard.Description.Trim());
+                        }
+                        else
+                        {
+                            builder.AppendLine();
+                        }
+
+                        if (agent.AgentCard.Skills != null && agent.AgentCard.Skills.Count > 0)
+                        {
+                            builder.AppendLine("  Skills:");
+                            for (int s = 0; s < agent.AgentCard.Skills.Count; s++)
+                            {
+                                A2ASkill skill = agent.AgentCard.Skills[s];
+                                builder.Append("    - ");
+                                builder.Append(skill.Name);
+                                if (!string.IsNullOrWhiteSpace(skill.Description))
+                                {
+                                    builder.Append(": ");
+                                    builder.Append(skill.Description);
+                                }
+                                builder.AppendLine();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        builder.AppendLine();
                     }
                 }
 
@@ -698,6 +837,27 @@ namespace LiveLink.Agent
 
         private async Task DisposeConnectionsAsync()
         {
+            // Dispose A2A clients.
+            for (int i = _connectedA2AAgents.Count - 1; i >= 0; i--)
+            {
+                ConnectedA2AAgent agent = _connectedA2AAgents[i];
+                if (agent?.Client != null)
+                {
+                    try
+                    {
+                        agent.Client.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogWarning(string.Format("[LiveLink-Agent] Failed to dispose A2A client '{0}': {1}",
+                            agent.DisplayName, ex.Message));
+                    }
+                }
+            }
+
+            _connectedA2AAgents.Clear();
+
+            // Dispose MCP clients.
             for (int i = _connectedServers.Count - 1; i >= 0; i--)
             {
                 ConnectedMcpServer server = _connectedServers[i];

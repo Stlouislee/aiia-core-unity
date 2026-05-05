@@ -1,0 +1,370 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using LiveLink.Agent.A2A;
+using Xunit;
+
+namespace A2A.Tests
+{
+    public class A2AClientTests
+    {
+        private static readonly JsonSerializerOptions s_jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+        };
+
+        private static readonly Uri s_testEndpoint = new Uri("https://test-agent.example.com/a2a");
+        private static readonly Uri s_testHost = new Uri("https://test-agent.example.com");
+
+        // ───────────────────── Agent Card Discovery ─────────────────────
+
+        [Fact]
+        public async Task GetAgentCardAsync_ReturnsCard()
+        {
+            string cardJson = JsonSerializer.Serialize(new A2AAgentCard
+            {
+                Name = "TestAgent",
+                Version = "1.0.0",
+                Description = "A test agent",
+                SupportedInterfaces = new List<A2AInterface>
+                {
+                    new A2AInterface { Url = "https://test-agent.example.com/a2a", ProtocolBinding = "HTTP+JSON" }
+                },
+                Capabilities = new A2ACapabilities { Streaming = true }
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+            {
+                Assert.Equal(HttpMethod.Get, req.Method);
+                Assert.EndsWith("/.well-known/agent-card.json", req.RequestUri.AbsolutePath);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(cardJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            A2AAgentCard card = await A2AClientTestExtensions.GetAgentCardAsync(s_testHost, handler: handler);
+
+            Assert.Equal("TestAgent", card.Name);
+            Assert.Equal("1.0.0", card.Version);
+            Assert.True(card.Capabilities.Streaming);
+        }
+
+        [Fact]
+        public async Task GetAgentCardAsync_ServerError_Throws()
+        {
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.InternalServerError));
+
+            await Assert.ThrowsAsync<HttpRequestException>(
+                () => A2AClientTestExtensions.GetAgentCardAsync(s_testHost, handler: handler));
+        }
+
+        // ───────────────────── Send Message (Synchronous) ─────────────────────
+
+        [Fact]
+        public async Task SendMessageAsync_ReturnsResponse()
+        {
+            string responseJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+            {
+                Message = new A2AMessage
+                {
+                    MessageId = "resp-1",
+                    Role = "agent",
+                    Parts = new List<A2APart> { A2APart.FromText("Hello from agent!") }
+                }
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+            {
+                Assert.Equal(HttpMethod.Post, req.Method);
+                Assert.Equal(s_testEndpoint, req.RequestUri);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                A2AMessage response = await client.SendMessageAsync(
+                    A2AMessage.CreateUserTextMessage("Hi!"));
+
+                Assert.NotNull(response);
+                Assert.Equal("agent", response.Role);
+                Assert.Equal("Hello from agent!", response.Parts[0].Text);
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_ErrorResponse_Throws()
+        {
+            string errorJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+            {
+                Error = new A2AError { Code = -32600, Message = "Invalid Request" }
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(errorJson, Encoding.UTF8, "application/json")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => client.SendMessageAsync(A2AMessage.CreateUserTextMessage("Hi!")));
+
+                Assert.Contains("-32600", ex.Message);
+                Assert.Contains("Invalid Request", ex.Message);
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_ServerError_Throws()
+        {
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                await Assert.ThrowsAsync<HttpRequestException>(
+                    () => client.SendMessageAsync(A2AMessage.CreateUserTextMessage("Hi!")));
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_SendsCorrectPayload()
+        {
+            string capturedBody = null;
+
+            var handler = new MockHttpHandler(req =>
+            {
+                capturedBody = req.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                string responseJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+                {
+                    Message = A2AMessage.CreateUserTextMessage("ok")
+                }, s_jsonOptions);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                await client.SendMessageAsync(A2AMessage.CreateUserTextMessage("test payload"));
+            }
+
+            Assert.NotNull(capturedBody);
+            using (JsonDocument doc = JsonDocument.Parse(capturedBody))
+            {
+                Assert.False(doc.RootElement.GetProperty("streaming").GetBoolean());
+                string text = doc.RootElement
+                    .GetProperty("message")
+                    .GetProperty("parts")[0]
+                    .GetProperty("text")
+                    .GetString();
+                Assert.Equal("test payload", text);
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_IncludesCustomHeaders()
+        {
+            string capturedAuth = null;
+
+            var handler = new MockHttpHandler(req =>
+            {
+                capturedAuth = req.Headers.Contains("Authorization")
+                    ? string.Join(",", req.Headers.GetValues("Authorization"))
+                    : null;
+                string responseJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+                {
+                    Message = A2AMessage.CreateUserTextMessage("ok")
+                }, s_jsonOptions);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            var headers = new Dictionary<string, string>
+            {
+                ["Authorization"] = "Bearer test-token-123"
+            };
+
+            using (var client = new A2AClient(s_testEndpoint, handler, headers))
+            {
+                await client.SendMessageAsync(A2AMessage.CreateUserTextMessage("hi"));
+            }
+
+            Assert.Equal("Bearer test-token-123", capturedAuth);
+        }
+
+        // ───────────────────── Streaming ─────────────────────
+
+        [Fact]
+        public async Task SendMessageStreamingAsync_ReceivesChunks()
+        {
+            string ssePayload =
+                "event: message\n" +
+                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n" +
+                "\n" +
+                "event: message\n" +
+                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\" World\"}]}}\n" +
+                "\n" +
+                "event: complete\n" +
+                "data: {\"taskId\":\"t1\",\"status\":\"completed\"}\n" +
+                "\n";
+
+            var handler = new MockHttpHandler(req =>
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(ssePayload, Encoding.UTF8, "text/event-stream")
+                };
+                return response;
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                var chunks = new List<string>();
+
+                List<A2AMessage> messages = await client.SendMessageStreamingAsync(
+                    A2AMessage.CreateUserTextMessage("stream test"),
+                    onMessageChunk: chunk =>
+                    {
+                        if (chunk.Parts != null)
+                        {
+                            foreach (var part in chunk.Parts)
+                            {
+                                if (part.Type == "text") chunks.Add(part.Text);
+                            }
+                        }
+                    });
+
+                Assert.Equal(2, messages.Count);
+                Assert.Equal("Hello", messages[0].Parts[0].Text);
+                Assert.Equal(" World", messages[1].Parts[0].Text);
+                Assert.Equal(new[] { "Hello", " World" }, chunks.ToArray());
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageStreamingAsync_EmptyStream_ReturnsEmptyList()
+        {
+            string ssePayload = "event: complete\ndata: {\"status\":\"completed\"}\n\n";
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(ssePayload, Encoding.UTF8, "text/event-stream")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                List<A2AMessage> messages = await client.SendMessageStreamingAsync(
+                    A2AMessage.CreateUserTextMessage("test"));
+
+                Assert.Empty(messages);
+            }
+        }
+
+        // ───────────────────── Disposal ─────────────────────
+
+        [Fact]
+        public async Task Dispose_ThenSendMessage_ThrowsObjectDisposed()
+        {
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK));
+
+            var client = new A2AClient(s_testEndpoint, handler);
+            client.Dispose();
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(
+                () => client.SendMessageAsync(A2AMessage.CreateUserTextMessage("hi")));
+        }
+
+        // ───────────────────── Helpers ─────────────────────
+
+        /// <summary>
+        /// Minimal mock HTTP handler. Routes all requests through a user-supplied function.
+        /// Also exposes a static overload for GetAgentCardAsync which needs a handler parameter.
+        /// </summary>
+        private class MockHttpHandler : HttpMessageHandler
+        {
+            private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
+
+            public MockHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> responder)
+            {
+                _responder = responder;
+            }
+
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                return Task.FromResult(_responder(request));
+            }
+        }
+    }
+
+    // Extension to let GetAgentCardAsync accept a handler (static method needs different approach).
+    // We use a small helper class to route the static call through a test handler.
+    internal static class A2AClientTestExtensions
+    {
+        public static Task<A2AAgentCard> GetAgentCardAsync(
+            Uri host,
+            Dictionary<string, string> headers = null,
+            float timeoutSeconds = 30f,
+            HttpMessageHandler handler = null)
+        {
+            if (handler != null)
+            {
+                // Use the handler-based path.
+                return GetAgentCardWithHandlerAsync(host, handler, headers, timeoutSeconds);
+            }
+
+            return A2AClient.GetAgentCardAsync(host, headers, timeoutSeconds);
+        }
+
+        private static async Task<A2AAgentCard> GetAgentCardWithHandlerAsync(
+            Uri host,
+            HttpMessageHandler handler,
+            Dictionary<string, string> headers,
+            float timeoutSeconds)
+        {
+            Uri cardUri = new Uri(host, "/.well-known/agent-card.json");
+
+            using (var client = new HttpClient(handler))
+            {
+                client.Timeout = TimeSpan.FromSeconds(Math.Max(1f, timeoutSeconds));
+
+                if (headers != null)
+                {
+                    foreach (var header in headers)
+                    {
+                        client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value);
+                    }
+                }
+
+                HttpResponseMessage response = await client.GetAsync(cardUri);
+                response.EnsureSuccessStatusCode();
+
+                string json = await response.Content.ReadAsStringAsync();
+                return JsonSerializer.Deserialize<A2AAgentCard>(json, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+                });
+            }
+        }
+    }
+}

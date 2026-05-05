@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using LiveLink.Agent.A2A;
 using UnityEngine;
 
 namespace LiveLink.Agent
@@ -69,6 +70,11 @@ namespace LiveLink.Agent
         [SerializeField]
         private List<AgentExternalMcpServerConfig> _externalMcpServers = new List<AgentExternalMcpServerConfig>();
 
+        [Header("Remote A2A Agents")]
+        [Tooltip("Remote A2A-compliant agents (OpenClaw, Hermes, etc.) that the embedded agent can delegate tasks to.")]
+        [SerializeField]
+        private List<AgentA2ARemoteConfig> _remoteA2AAgents = new List<AgentA2ARemoteConfig>();
+
         public string AgentName => _agentName;
         public string OpenAIModel => _openAIModel;
         public bool PreferEnvironmentApiKey => _preferEnvironmentApiKey;
@@ -86,6 +92,7 @@ namespace LiveLink.Agent
         public int MaxPersistedMessages => _maxPersistedMessages;
         public int MaxHistoryFileSizeBytes => _maxHistoryFileSizeBytes;
         public IReadOnlyList<AgentExternalMcpServerConfig> ExternalMcpServers => _externalMcpServers;
+        public IReadOnlyList<AgentA2ARemoteConfig> RemoteA2AAgents => _remoteA2AAgents;
 
         public string ResolveOpenAIApiKey()
         {
