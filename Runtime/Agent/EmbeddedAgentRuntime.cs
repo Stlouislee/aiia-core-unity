@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net;
+using System.Net.Http;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -68,6 +68,12 @@ namespace LiveLink.Agent
 
         public AgentToolCallEvent OnToolCall = new AgentToolCallEvent();
 
+        /// <summary>Fired when an MCP server connection is lost.</summary>
+        public AgentTextEvent OnConnectionLost = new AgentTextEvent();
+
+        /// <summary>Fired when an MCP server connection is restored after reconnection.</summary>
+        public AgentTextEvent OnConnectionRestored = new AgentTextEvent();
+
         private readonly SemaphoreSlim _initializationLock = new SemaphoreSlim(1, 1);
         private readonly SemaphoreSlim _runLock = new SemaphoreSlim(1, 1);
         private readonly List<ConnectedMcpServer> _connectedServers = new List<ConnectedMcpServer>();
@@ -77,8 +83,9 @@ namespace LiveLink.Agent
         private AIAgent _agent;
         private AgentSession _session;
         private A2AHostServer _a2aHostServer;
-        private bool _isInitialized;
-        private bool _isBusy;
+        private CancellationTokenSource _heartbeatCts;
+        private volatile bool _isInitialized;
+        private volatile bool _isBusy;
         private string _status = "Idle";
         private string _lastResponse;
         private string _lastError;
@@ -93,6 +100,7 @@ namespace LiveLink.Agent
             public string ServerInstructions;
             public string ServerName;
             public string ServerVersion;
+            public AgentExternalMcpServerConfig ExternalConfig; // stored for reconnection
         }
 
         private sealed class ConnectedA2AAgent
@@ -127,7 +135,7 @@ namespace LiveLink.Agent
         {
             if (_autoInitialize)
             {
-                RunBackgroundTask(() => InitializeAsync());
+                RunBackgroundTask(() => InitializeWithRetryAsync());
             }
         }
 
@@ -138,7 +146,7 @@ namespace LiveLink.Agent
 
         public void InitializeRuntime()
         {
-            RunBackgroundTask(() => InitializeAsync());
+            RunBackgroundTask(() => InitializeWithRetryAsync());
         }
 
         public void ReinitializeRuntime()
@@ -149,7 +157,30 @@ namespace LiveLink.Agent
         public async Task ReinitializeAsync()
         {
             await ShutdownAsync().ConfigureAwait(false);
-            await InitializeAsync().ConfigureAwait(false);
+            await InitializeWithRetryAsync().ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Initialize with exponential backoff retry. Retries up to <paramref name="maxRetries"/> times.
+        /// </summary>
+        private async Task InitializeWithRetryAsync(int maxRetries = 3)
+        {
+            for (int attempt = 0; attempt < maxRetries; attempt++)
+            {
+                try
+                {
+                    await InitializeAsync().ConfigureAwait(false);
+                    return; // Success
+                }
+                catch (Exception ex) when (attempt < maxRetries - 1)
+                {
+                    int delayMs = 1000 * (1 << attempt); // 1s, 2s, 4s
+                    SetStatus(string.Format("Initialization attempt {0} failed: {1}. Retrying in {2}ms...",
+                        attempt + 1, ex.Message, delayMs));
+
+                    await Task.Delay(delayMs).ConfigureAwait(false);
+                }
+            }
         }
 
         public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -299,6 +330,10 @@ namespace LiveLink.Agent
                 }
 
                 _isInitialized = true;
+
+                // Start MCP connection heartbeat.
+                StartMcpHeartbeat();
+
                 SetStatus(string.Format("Ready. Connected {0} MCP server(s), {1} A2A agent(s).",
                     _connectedServers.Count, _connectedA2AAgents.Count));
             }
@@ -393,6 +428,9 @@ namespace LiveLink.Agent
             _agent = null;
             _session = null;
             _availableToolNames.Clear();
+
+            // Stop MCP heartbeat.
+            StopMcpHeartbeat();
 
             // Stop A2A host server.
             if (_a2aHostServer != null)
@@ -514,7 +552,8 @@ namespace LiveLink.Agent
                 Client = client,
                 ServerInstructions = client.ServerInstructions,
                 ServerName = client.ServerInfo.Name,
-                ServerVersion = client.ServerInfo.Version
+                ServerVersion = client.ServerInfo.Version,
+                ExternalConfig = config
             };
 
             IList<McpClientTool> discoveredTools = await WithTimeout(
@@ -845,30 +884,42 @@ namespace LiveLink.Agent
         {
             if (_config.LocalHttpTransportMode == AgentMcpHttpTransportMode.Sse)
             {
-                Debug.LogWarning(
-                    "[LiveLink-Agent] Legacy SSE transport is fragile with the current MCP C# SDK inside Unity. " +
-                    "Using StreamableHttp against the local /mcp endpoint instead.");
+                string message =
+                    "[LiveLink-Agent] SSE transport selected in Inspector but silently overridden to StreamableHttp. " +
+                    "The legacy SSE transport is fragile with the current MCP C# SDK inside Unity. " +
+                    "Please change the 'Local HTTP Transport' field to 'StreamableHttp' in the AgentRuntimeConfig Inspector to suppress this warning.";
+
+                Debug.LogWarning(message);
+                SetStatus("Warning: SSE overridden to StreamableHttp (see console).");
+
                 return AgentMcpHttpTransportMode.StreamableHttp;
             }
 
             return _config.LocalHttpTransportMode;
         }
 
+        /// <summary>
+        /// Shared HttpClient for health probes and lightweight HTTP calls.
+        /// Static to avoid socket exhaustion. Cross-platform safe (works on Android/iOS/WebGL IL2CPP).
+        /// Uses default handler — no platform-specific HttpClientHandler configuration.
+        /// </summary>
+        private static readonly HttpClient s_healthProbeClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMilliseconds(500)
+        };
+
         private static async Task<bool> ProbeLocalServerHealthAsync(Uri healthUri)
         {
-            HttpWebRequest request = WebRequest.CreateHttp(healthUri);
-            request.Method = "GET";
-            request.Timeout = 500;
-            request.ReadWriteTimeout = 500;
-
-            using (WebResponse response = await request.GetResponseAsync().ConfigureAwait(false))
+            try
             {
-                if (!(response is HttpWebResponse httpResponse))
+                using (HttpResponseMessage response = await s_healthProbeClient.GetAsync(healthUri).ConfigureAwait(false))
                 {
-                    return false;
+                    return (int)response.StatusCode >= 200 && (int)response.StatusCode < 300;
                 }
-
-                return (int)httpResponse.StatusCode >= 200 && (int)httpResponse.StatusCode < 300;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -887,6 +938,106 @@ namespace LiveLink.Agent
 #else
             return configuredTimeout;
 #endif
+        }
+
+        // ──────────────────────── MCP Heartbeat & Reconnection ────────────────────────
+
+        private void StartMcpHeartbeat()
+        {
+            StopMcpHeartbeat();
+            _heartbeatCts = new CancellationTokenSource();
+            _ = McpHeartbeatLoopAsync(_heartbeatCts.Token);
+        }
+
+        private void StopMcpHeartbeat()
+        {
+            if (_heartbeatCts != null)
+            {
+                try { _heartbeatCts.Cancel(); } catch { }
+                _heartbeatCts.Dispose();
+                _heartbeatCts = null;
+            }
+        }
+
+        /// <summary>
+        /// Periodically health-checks connected MCP servers. On failure, attempts reconnection.
+        /// Runs every 30 seconds. Only checks external (non-local) servers since local servers
+        /// are managed by the LiveLinkManager lifecycle.
+        /// </summary>
+        private async Task McpHeartbeatLoopAsync(CancellationToken ct)
+        {
+            const int heartbeatIntervalMs = 30000;
+            const int maxReconnectAttempts = 3;
+
+            while (!ct.IsCancellationRequested && _isInitialized)
+            {
+                try
+                {
+                    await Task.Delay(heartbeatIntervalMs, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { break; }
+
+                if (!_isInitialized) break;
+
+                // Snapshot the server list.
+                List<ConnectedMcpServer> servers;
+                lock (_connectedServers)
+                {
+                    servers = new List<ConnectedMcpServer>(_connectedServers);
+                }
+
+                foreach (ConnectedMcpServer server in servers)
+                {
+                    if (server.IsLocal || server.Client == null) continue;
+
+                    try
+                    {
+                        // Lightweight health check — list tools.
+                        await server.Client.ListToolsAsync(ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        DispatchToMainThread(() => OnConnectionLost.Invoke(
+                            string.Format("MCP server '{0}' connection lost: {1}", server.DisplayName, ex.Message)));
+
+                        // Attempt reconnection.
+                        bool restored = false;
+                        if (server.ExternalConfig != null)
+                        {
+                            for (int attempt = 0; attempt < maxReconnectAttempts && !ct.IsCancellationRequested; attempt++)
+                            {
+                                try
+                                {
+                                    int delayMs = 1000 * (1 << attempt);
+                                    await Task.Delay(delayMs, ct).ConfigureAwait(false);
+
+                                    // Re-create the MCP client from stored config.
+                                    McpClient newClient = await AgentMcpClientFactory.CreateExternalClientAsync(
+                                        server.ExternalConfig, ct).ConfigureAwait(false);
+
+                                    if (newClient != null)
+                                    {
+                                        server.Client = newClient;
+                                        restored = true;
+                                        DispatchToMainThread(() => OnConnectionRestored.Invoke(
+                                            string.Format("MCP server '{0}' reconnected.", server.DisplayName)));
+                                        break;
+                                    }
+                                }
+                                catch (OperationCanceledException) { throw; }
+                                catch { }
+                            }
+                        }
+
+                        if (!restored)
+                        {
+                            DispatchToMainThread(() => OnConnectionLost.Invoke(
+                                string.Format("MCP server '{0}' reconnection failed after {1} attempts.",
+                                    server.DisplayName, maxReconnectAttempts)));
+                        }
+                    }
+                }
+            }
         }
 
         private async Task DisposeConnectionsAsync()
