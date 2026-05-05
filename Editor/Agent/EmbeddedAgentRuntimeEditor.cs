@@ -112,10 +112,17 @@ namespace LiveLink.Agent.Editor
             }
             EditorGUILayout.EndHorizontal();
 
+            EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button("Reset Session"))
             {
                 runtime.ResetSession();
             }
+
+            if (GUILayout.Button("Open Chat Window"))
+            {
+                EmbeddedAgentChatWindow.ShowWindow();
+            }
+            EditorGUILayout.EndHorizontal();
 
             if (runtime.Config == null)
             {

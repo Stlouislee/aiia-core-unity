@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 // using System.Net.WebSockets;
 using UnityEngine;
 using Newtonsoft.Json.Linq;
@@ -145,6 +146,18 @@ namespace LiveLink
         /// Gets the number of active MCP sessions.
         /// </summary>
         public int MCPClientCount => _mcpHttpServer?.ClientCount ?? 0;
+
+        /// <summary>
+        /// Sets a handler for the /chat/api endpoint. Receives (messageJson, cancellationToken)
+        /// and returns an async enumerable of JSON-encoded update objects.
+        /// </summary>
+        public void SetChatStreamHandler(Func<string, System.Threading.CancellationToken, IAsyncEnumerable<string>> handler)
+        {
+            if (_mcpHttpServer != null)
+            {
+                _mcpHttpServer.ChatStreamHandler = handler;
+            }
+        }
 
         /// <summary>
         /// Gets whether the MCP HTTP server is running.

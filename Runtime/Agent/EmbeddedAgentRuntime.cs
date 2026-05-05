@@ -1,7 +1,8 @@
 using System;
+using System.ClientModel;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net;
+using System.Net.Http;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -9,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using LiveLink.Agent.A2A;
 using ModelContextProtocol.Client;
 using OpenAI;
 using UnityEngine;
@@ -25,7 +27,7 @@ namespace LiveLink.Agent
     [AddComponentMenu("LiveLink/Embedded Agent Runtime")]
     public class EmbeddedAgentRuntime : MonoBehaviour
     {
-        private const int LocalServerReadinessTimeoutSeconds = 3;
+        private const int DefaultLocalServerReadinessTimeoutSeconds = 10;
         private const int LocalServerReadinessPollIntervalMs = 100;
         private const int ToolDiscoveryTimeoutSeconds = 15;
         private const int AgentSessionInitializationTimeoutSeconds = 30;
@@ -67,17 +69,27 @@ namespace LiveLink.Agent
 
         public AgentToolCallEvent OnToolCall = new AgentToolCallEvent();
 
+        /// <summary>Fired when an MCP server connection is lost.</summary>
+        public AgentTextEvent OnConnectionLost = new AgentTextEvent();
+
+        /// <summary>Fired when an MCP server connection is restored after reconnection.</summary>
+        public AgentTextEvent OnConnectionRestored = new AgentTextEvent();
+
         private readonly SemaphoreSlim _initializationLock = new SemaphoreSlim(1, 1);
         private readonly SemaphoreSlim _runLock = new SemaphoreSlim(1, 1);
         private readonly List<ConnectedMcpServer> _connectedServers = new List<ConnectedMcpServer>();
+        private readonly List<ConnectedA2AAgent> _connectedA2AAgents = new List<ConnectedA2AAgent>();
         private readonly List<string> _availableToolNames = new List<string>();
 
         private AIAgent _agent;
         private AgentSession _session;
-        private bool _isInitialized;
-        private bool _isBusy;
+        private A2AHostServer _a2aHostServer;
+        private CancellationTokenSource _heartbeatCts;
+        private volatile bool _isInitialized;
+        private volatile bool _isBusy;
         private string _status = "Idle";
         private string _lastResponse;
+        private AgentResponse _lastAgentResponse;
         private string _lastError;
 
         private sealed class ConnectedMcpServer
@@ -90,6 +102,15 @@ namespace LiveLink.Agent
             public string ServerInstructions;
             public string ServerName;
             public string ServerVersion;
+            public AgentExternalMcpServerConfig ExternalConfig; // stored for reconnection
+        }
+
+        private sealed class ConnectedA2AAgent
+        {
+            public string DisplayName;
+            public A2AClient Client;
+            public A2AAgentCard AgentCard;
+            public A2AAgentToolWrapper Tool;
         }
 
         public AgentRuntimeConfig Config => _config;
@@ -98,6 +119,7 @@ namespace LiveLink.Agent
         public bool IsBusy => _isBusy;
         public string Status => _status;
         public string LastResponse => _lastResponse;
+        public AgentResponse LastAgentResponse => _lastAgentResponse;
         public string LastError => _lastError;
         public int ConnectedServerCount => _connectedServers.Count;
         public IReadOnlyList<string> AvailableToolNames => _availableToolNames.AsReadOnly();
@@ -116,7 +138,7 @@ namespace LiveLink.Agent
         {
             if (_autoInitialize)
             {
-                RunBackgroundTask(() => InitializeAsync());
+                RunBackgroundTask(() => InitializeWithRetryAsync());
             }
         }
 
@@ -127,7 +149,7 @@ namespace LiveLink.Agent
 
         public void InitializeRuntime()
         {
-            RunBackgroundTask(() => InitializeAsync());
+            RunBackgroundTask(() => InitializeWithRetryAsync());
         }
 
         public void ReinitializeRuntime()
@@ -138,7 +160,30 @@ namespace LiveLink.Agent
         public async Task ReinitializeAsync()
         {
             await ShutdownAsync().ConfigureAwait(false);
-            await InitializeAsync().ConfigureAwait(false);
+            await InitializeWithRetryAsync().ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Initialize with exponential backoff retry. Retries up to <paramref name="maxRetries"/> times.
+        /// </summary>
+        private async Task InitializeWithRetryAsync(int maxRetries = 3)
+        {
+            for (int attempt = 0; attempt < maxRetries; attempt++)
+            {
+                try
+                {
+                    await InitializeAsync().ConfigureAwait(false);
+                    return; // Success
+                }
+                catch (Exception ex) when (attempt < maxRetries - 1)
+                {
+                    int delayMs = 1000 * (1 << attempt); // 1s, 2s, 4s
+                    SetStatus(string.Format("Initialization attempt {0} failed: {1}. Retrying in {2}ms...",
+                        attempt + 1, ex.Message, delayMs));
+
+                    await Task.Delay(delayMs).ConfigureAwait(false);
+                }
+            }
         }
 
         public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -159,11 +204,11 @@ namespace LiveLink.Agent
                 SetStatus("Initializing agent runtime...");
                 _lastError = string.Empty;
 
-                string apiKey = _config.ResolveOpenAIApiKey();
+                string apiKey = _config.ResolveApiKey();
                 if (string.IsNullOrWhiteSpace(apiKey))
                 {
                     throw new InvalidOperationException(
-                        "No OpenAI API key was configured. Set one on the AgentRuntimeConfig asset or provide it through the configured environment variable.");
+                        "No API key was configured. Set one on the AgentRuntimeConfig asset, call SetApiKey() at runtime, or provide it through the configured environment variable.");
                 }
 
                 await ResolveLiveLinkManagerReferenceAsync(cancellationToken).ConfigureAwait(false);
@@ -200,14 +245,52 @@ namespace LiveLink.Agent
                     }
                 }
 
+                // Connect to remote A2A agents (OpenClaw, Hermes, etc.)
+                if (_config.RemoteA2AAgents != null)
+                {
+                    for (int i = 0; i < _config.RemoteA2AAgents.Count; i++)
+                    {
+                        AgentA2ARemoteConfig a2aConfig = _config.RemoteA2AAgents[i];
+                        if (a2aConfig == null || !a2aConfig.Enabled)
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            SetStatus(string.Format("Connecting A2A agent: {0}...", a2aConfig.DisplayName));
+                            ConnectedA2AAgent connected = await ConnectA2AAgentAsync(a2aConfig, cancellationToken)
+                                .ConfigureAwait(false);
+                            _connectedA2AAgents.Add(connected);
+                            SetStatus(string.Format("Connected A2A agent: {0}", a2aConfig.DisplayName));
+                        }
+                        catch (Exception ex)
+                        {
+                            warnings.Add(string.Format("Failed to connect A2A agent '{0}': {1}",
+                                a2aConfig.DisplayName, ex.Message));
+                        }
+                    }
+                }
+
                 SetStatus("Preparing agent tools...");
                 List<AITool> tools = BuildToolList(warnings);
                 string instructions = BuildInstructions(warnings);
 
-                SetStatus("Creating OpenAI chat client...");
-                var openAiClient = new OpenAIClient(apiKey);
+                SetStatus("Creating chat client...");
+                OpenAIClient openAiClient;
+                string endpoint = _config.ApiEndpoint;
+                if (!string.IsNullOrWhiteSpace(endpoint))
+                {
+                    var options = new OpenAIClientOptions { Endpoint = new System.Uri(endpoint) };
+                    openAiClient = new OpenAIClient(new ApiKeyCredential(apiKey), options);
+                }
+                else
+                {
+                    openAiClient = new OpenAIClient(new ApiKeyCredential(apiKey));
+                }
+
 #pragma warning disable OPENAI001
-                IChatClient chatClient = openAiClient.GetChatClient(_config.OpenAIModel).AsIChatClient();
+                IChatClient chatClient = openAiClient.GetChatClient(_config.Model).AsIChatClient();
 #pragma warning restore OPENAI001
 
                 ChatHistoryProvider chatHistoryProvider = null;
@@ -243,8 +326,33 @@ namespace LiveLink.Agent
                         .ConfigureAwait(false);
                 }
 
+                // Start A2A host server if configured.
+                if (_config.A2AHostConfig != null && _config.A2AHostConfig.Enabled)
+                {
+                    try
+                    {
+                        SetStatus("Starting A2A host server...");
+                        _a2aHostServer = new A2AHostServer(
+                            _config.A2AHostConfig,
+                            (userMessage, ct) => SendMessageAsync(userMessage, ct));
+                        _a2aHostServer.Start();
+                    }
+                    catch (Exception ex)
+                    {
+                        warnings.Add(string.Format("Failed to start A2A host server: {0}", ex.Message));
+                    }
+                }
+
                 _isInitialized = true;
-                SetStatus(string.Format("Ready. Connected {0} MCP server(s).", _connectedServers.Count));
+
+                // Register web chat handler on the local MCP server.
+                RegisterChatHandler();
+
+                // Start MCP connection heartbeat.
+                StartMcpHeartbeat();
+
+                SetStatus(string.Format("Ready. Connected {0} MCP server(s), {1} A2A agent(s).",
+                    _connectedServers.Count, _connectedA2AAgents.Count));
             }
             catch (Exception ex)
             {
@@ -287,7 +395,17 @@ namespace LiveLink.Agent
             SubmitMessage(message);
         }
 
-        public async Task<string> SendMessageAsync(string message, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// Runs the agent with the given message and returns a structured <see cref="AgentResponse"/>
+        /// containing all messages, tool calls, usage information, and finish reason.
+        /// </summary>
+        /// <remarks>
+        /// This is the primary API for interacting with the agent. It returns the full
+        /// <see cref="AgentResponse"/> from the Microsoft Agent Framework, giving callers
+        /// access to intermediate steps (<see cref="AgentResponse.Messages"/>), token usage
+        /// (<see cref="AgentResponse.Usage"/>), and finish reason (<see cref="AgentResponse.FinishReason"/>).
+        /// </remarks>
+        public async Task<AgentResponse> RunAsync(string message, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(message))
             {
@@ -310,11 +428,13 @@ namespace LiveLink.Agent
                     _session = await _agent.CreateSessionAsync().ConfigureAwait(false);
                 }
 
-                var response = await _agent.RunAsync(message, _session).ConfigureAwait(false);
-                _lastResponse = response != null ? response.ToString() : string.Empty;
+                AgentResponse response = await _agent.RunAsync(message, _session, cancellationToken: cancellationToken).ConfigureAwait(false);
+                _lastAgentResponse = response;
+                _lastResponse = response?.Text ?? string.Empty;
+
                 SetStatus("Response received.");
                 DispatchToMainThread(() => OnResponseReceived.Invoke(_lastResponse));
-                return _lastResponse;
+                return response;
             }
             catch (Exception ex)
             {
@@ -331,14 +451,176 @@ namespace LiveLink.Agent
             }
         }
 
+        /// <summary>
+        /// Runs the agent with streaming enabled, yielding <see cref="AgentResponseUpdate"/>
+        /// chunks as they are produced. Each update may contain text, function calls,
+        /// function results, or other content types.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Streaming updates are typed — inspect <see cref="AgentResponseUpdate.Contents"/>
+        /// to distinguish between <see cref="TextContent"/>, <see cref="FunctionCallContent"/>,
+        /// and <see cref="FunctionResultContent"/>.
+        /// </para>
+        /// <para>
+        /// The caller must consume the full stream. Partial consumption may leave the agent
+        /// in an inconsistent state.
+        /// </para>
+        /// </remarks>
+        public async IAsyncEnumerable<AgentResponseUpdate> RunStreamingAsync(
+            string message,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                throw new ArgumentException("Message cannot be empty.", nameof(message));
+            }
+
+            if (!_isInitialized)
+            {
+                await InitializeAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await _runLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                _isBusy = true;
+                SetStatus("Streaming agent response...");
+
+                if (_session == null)
+                {
+                    _session = await _agent.CreateSessionAsync().ConfigureAwait(false);
+                }
+
+                var sb = new StringBuilder();
+
+                await foreach (AgentResponseUpdate update in _agent.RunStreamingAsync(message, _session, cancellationToken: cancellationToken).ConfigureAwait(false))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    // Accumulate text for LastResponse.
+                    if (update.Text != null)
+                    {
+                        sb.Append(update.Text);
+                    }
+
+                    // Fire OnToolCall for function call content.
+                    foreach (var content in update.Contents ?? System.Array.Empty<AIContent>())
+                    {
+                        if (content is FunctionCallContent fcc)
+                        {
+                            string toolName = fcc.Name ?? "(unknown)";
+                            string toolArgs = fcc.Arguments != null
+                                ? System.Text.Json.JsonSerializer.Serialize(fcc.Arguments)
+                                : "{}";
+                            DispatchToMainThread(() => OnToolCall.Invoke(toolName, toolArgs));
+                        }
+                    }
+
+                    yield return update;
+                }
+
+                _lastResponse = sb.ToString();
+                SetStatus("Response received.");
+                DispatchToMainThread(() => OnResponseReceived.Invoke(_lastResponse));
+            }
+            finally
+            {
+                _isBusy = false;
+                _runLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Sends a message and returns the aggregated text response.
+        /// Convenience wrapper around <see cref="RunAsync"/> for backward compatibility.
+        /// </summary>
+        public async Task<string> SendMessageAsync(string message, CancellationToken cancellationToken = default)
+        {
+            AgentResponse response = await RunAsync(message, cancellationToken).ConfigureAwait(false);
+            return response.Text;
+        }
+
         public async Task ShutdownAsync()
         {
             _isInitialized = false;
             _agent = null;
             _session = null;
             _availableToolNames.Clear();
+
+            // Stop MCP heartbeat.
+            StopMcpHeartbeat();
+
+            // Stop A2A host server.
+            if (_a2aHostServer != null)
+            {
+                try { _a2aHostServer.Dispose(); } catch { }
+                _a2aHostServer = null;
+            }
+
             await DisposeConnectionsAsync().ConfigureAwait(false);
             SetStatus("Stopped.");
+        }
+
+        private async Task<ConnectedA2AAgent> ConnectA2AAgentAsync(AgentA2ARemoteConfig config, CancellationToken cancellationToken)
+        {
+            Uri endpoint = new Uri(config.Endpoint);
+            Dictionary<string, string> headers = config.GetHeadersDictionary();
+
+            // Create a custom handler that accepts self-signed certs if configured.
+            HttpMessageHandler certHandler = config.AcceptSelfSignedCertificates
+                ? A2AClient.CreateHandlerWithCertificateValidation((_, _, _, _) => true)
+                : null;
+
+            A2AAgentCard card = null;
+            if (config.UseAgentCardDiscovery)
+            {
+                SetStatus(string.Format("Discovering A2A agent card: {0}...", config.DisplayName));
+                card = await A2AClient.GetAgentCardAsync(
+                        endpoint, headers, config.ConnectionTimeoutSeconds, certHandler)
+                    .ConfigureAwait(false);
+            }
+
+            // If agent card exposes a specific HTTP+JSON endpoint URL, use it.
+            Uri agentEndpoint = endpoint;
+            if (card?.SupportedInterfaces != null)
+            {
+                for (int i = 0; i < card.SupportedInterfaces.Count; i++)
+                {
+                    A2AInterface iface = card.SupportedInterfaces[i];
+                    if (!string.IsNullOrEmpty(iface?.Url)
+                        && string.Equals(iface.ProtocolBinding, "HTTP+JSON", StringComparison.OrdinalIgnoreCase))
+                    {
+                        agentEndpoint = new Uri(iface.Url);
+                        break;
+                    }
+                }
+            }
+
+            // Pass the cert handler to the client so it applies to all requests.
+            var client = certHandler != null
+                ? new A2AClient(agentEndpoint, certHandler, headers, config.ConnectionTimeoutSeconds)
+                : new A2AClient(agentEndpoint, headers, config.ConnectionTimeoutSeconds);
+
+            try
+            {
+                var tool = new A2AAgentToolWrapper(
+                    config.DisplayName, client, card, config.EnableStreaming, EmitToolCall,
+                    toolNamePrefix: config.DelegateToolPrefix);
+
+                return new ConnectedA2AAgent
+                {
+                    DisplayName = config.DisplayName,
+                    Client = client,
+                    AgentCard = card,
+                    Tool = tool
+                };
+            }
+            catch
+            {
+                client.Dispose();
+                throw;
+            }
         }
 
         private async Task<ConnectedMcpServer> ConnectLocalLiveLinkServerAsync(CancellationToken cancellationToken)
@@ -389,7 +671,8 @@ namespace LiveLink.Agent
                 Client = client,
                 ServerInstructions = client.ServerInstructions,
                 ServerName = client.ServerInfo.Name,
-                ServerVersion = client.ServerInfo.Version
+                ServerVersion = client.ServerInfo.Version,
+                ExternalConfig = config
             };
 
             IList<McpClientTool> discoveredTools = await WithTimeout(
@@ -448,6 +731,23 @@ namespace LiveLink.Agent
                 }
             }
 
+            // Add A2A remote agent tools.
+            for (int i = 0; i < _connectedA2AAgents.Count; i++)
+            {
+                ConnectedA2AAgent agent = _connectedA2AAgents[i];
+                if (agent.Tool != null && seenNames.Add(agent.Tool.Name))
+                {
+                    tools.Add(agent.Tool);
+                    _availableToolNames.Add(agent.Tool.Name);
+                }
+                else if (agent.Tool != null)
+                {
+                    warnings.Add(string.Format(
+                        "Skipped duplicate A2A tool '{0}' from agent '{1}'.",
+                        agent.Tool.Name, agent.DisplayName));
+                }
+            }
+
             _availableToolNames.Sort(StringComparer.OrdinalIgnoreCase);
             return tools;
         }
@@ -497,6 +797,57 @@ namespace LiveLink.Agent
                     if (!string.IsNullOrWhiteSpace(server.ServerInstructions))
                     {
                         builder.AppendLine(server.ServerInstructions.Trim());
+                    }
+                }
+
+                builder.AppendLine();
+            }
+
+            if (_connectedA2AAgents.Count > 0)
+            {
+                builder.AppendLine("Connected remote A2A agents (use their delegate tools to ask questions or assign tasks):");
+                for (int i = 0; i < _connectedA2AAgents.Count; i++)
+                {
+                    ConnectedA2AAgent agent = _connectedA2AAgents[i];
+                    builder.Append("- ");
+                    builder.Append(agent.DisplayName);
+                    if (agent.AgentCard != null)
+                    {
+                        if (!string.IsNullOrWhiteSpace(agent.AgentCard.Version))
+                        {
+                            builder.Append(" v");
+                            builder.Append(agent.AgentCard.Version);
+                        }
+                        if (!string.IsNullOrWhiteSpace(agent.AgentCard.Description))
+                        {
+                            builder.Append(" — ");
+                            builder.AppendLine(agent.AgentCard.Description.Trim());
+                        }
+                        else
+                        {
+                            builder.AppendLine();
+                        }
+
+                        if (agent.AgentCard.Skills != null && agent.AgentCard.Skills.Count > 0)
+                        {
+                            builder.AppendLine("  Skills:");
+                            for (int s = 0; s < agent.AgentCard.Skills.Count; s++)
+                            {
+                                A2ASkill skill = agent.AgentCard.Skills[s];
+                                builder.Append("    - ");
+                                builder.Append(skill.Name);
+                                if (!string.IsNullOrWhiteSpace(skill.Description))
+                                {
+                                    builder.Append(": ");
+                                    builder.Append(skill.Description);
+                                }
+                                builder.AppendLine();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        builder.AppendLine();
                     }
                 }
 
@@ -572,7 +923,8 @@ namespace LiveLink.Agent
         private async Task WaitForLocalServerReadinessAsync(CancellationToken cancellationToken)
         {
             Uri healthUri = BuildLocalHealthUri();
-            DateTime deadlineUtc = DateTime.UtcNow.AddSeconds(LocalServerReadinessTimeoutSeconds);
+            float readinessTimeout = _config != null ? _config.LocalReadinessTimeoutSeconds : DefaultLocalServerReadinessTimeoutSeconds;
+            DateTime deadlineUtc = DateTime.UtcNow.AddSeconds(readinessTimeout);
             Exception lastException = null;
 
             while (DateTime.UtcNow < deadlineUtc)
@@ -598,12 +950,12 @@ namespace LiveLink.Agent
             if (lastException != null)
             {
                 throw new TimeoutException(
-                    $"Local LiveLink MCP did not become healthy within {LocalServerReadinessTimeoutSeconds} seconds ({healthUri}). Last error: {lastException.Message}",
+                    $"Local LiveLink MCP did not become healthy within {readinessTimeout} seconds ({healthUri}). Last error: {lastException.Message}",
                     lastException);
             }
 
             throw new TimeoutException(
-                $"Local LiveLink MCP did not become healthy within {LocalServerReadinessTimeoutSeconds} seconds ({healthUri}).");
+                $"Local LiveLink MCP did not become healthy within {readinessTimeout} seconds ({healthUri}).");
         }
 
         private Uri BuildLocalHealthUri()
@@ -652,30 +1004,42 @@ namespace LiveLink.Agent
         {
             if (_config.LocalHttpTransportMode == AgentMcpHttpTransportMode.Sse)
             {
-                Debug.LogWarning(
-                    "[LiveLink-Agent] Legacy SSE transport is fragile with the current MCP C# SDK inside Unity. " +
-                    "Using StreamableHttp against the local /mcp endpoint instead.");
+                string message =
+                    "[LiveLink-Agent] SSE transport selected in Inspector but silently overridden to StreamableHttp. " +
+                    "The legacy SSE transport is fragile with the current MCP C# SDK inside Unity. " +
+                    "Please change the 'Local HTTP Transport' field to 'StreamableHttp' in the AgentRuntimeConfig Inspector to suppress this warning.";
+
+                Debug.LogWarning(message);
+                SetStatus("Warning: SSE overridden to StreamableHttp (see console).");
+
                 return AgentMcpHttpTransportMode.StreamableHttp;
             }
 
             return _config.LocalHttpTransportMode;
         }
 
+        /// <summary>
+        /// Shared HttpClient for health probes and lightweight HTTP calls.
+        /// Static to avoid socket exhaustion. Cross-platform safe (works on Android/iOS/WebGL IL2CPP).
+        /// Uses default handler — no platform-specific HttpClientHandler configuration.
+        /// </summary>
+        private static readonly HttpClient s_healthProbeClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromMilliseconds(500)
+        };
+
         private static async Task<bool> ProbeLocalServerHealthAsync(Uri healthUri)
         {
-            HttpWebRequest request = WebRequest.CreateHttp(healthUri);
-            request.Method = "GET";
-            request.Timeout = 500;
-            request.ReadWriteTimeout = 500;
-
-            using (WebResponse response = await request.GetResponseAsync().ConfigureAwait(false))
+            try
             {
-                if (!(response is HttpWebResponse httpResponse))
+                using (HttpResponseMessage response = await s_healthProbeClient.GetAsync(healthUri).ConfigureAwait(false))
                 {
-                    return false;
+                    return (int)response.StatusCode >= 200 && (int)response.StatusCode < 300;
                 }
-
-                return (int)httpResponse.StatusCode >= 200 && (int)httpResponse.StatusCode < 300;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -696,8 +1060,205 @@ namespace LiveLink.Agent
 #endif
         }
 
+        // ──────────────────────── Web Chat ────────────────────────
+
+        private void RegisterChatHandler()
+        {
+            if (_liveLinkManager == null) return;
+
+            _liveLinkManager.SetChatStreamHandler((messageJson, ct) => HandleChatStreamAsync(messageJson, ct));
+        }
+
+        private async IAsyncEnumerable<string> HandleChatStreamAsync(
+            string messageJson,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            string userMessage;
+            string parseError = null;
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(messageJson);
+                userMessage = parsed.GetProperty("message").GetString();
+            }
+            catch (Exception ex)
+            {
+                parseError = ex.Message;
+                userMessage = null;
+            }
+
+            if (parseError != null)
+            {
+                yield return System.Text.Json.JsonSerializer.Serialize(new { error = "Invalid request. Expected JSON with 'message' field." });
+                yield break;
+            }
+
+            if (string.IsNullOrWhiteSpace(userMessage))
+            {
+                yield return System.Text.Json.JsonSerializer.Serialize(new { error = "Message cannot be empty." });
+                yield break;
+            }
+
+            await foreach (AgentResponseUpdate update in RunStreamingAsync(userMessage, cancellationToken).ConfigureAwait(false))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var obj = new System.Collections.Generic.Dictionary<string, object>();
+
+                if (update.Text != null)
+                    obj["text"] = update.Text;
+
+                if (update.FinishReason.HasValue)
+                    obj["finishReason"] = update.FinishReason.Value.ToString();
+
+                if (update.Contents != null)
+                {
+                    var contents = new System.Collections.Generic.List<object>();
+                    foreach (var content in update.Contents)
+                    {
+                        if (content is FunctionCallContent fcc)
+                        {
+                            contents.Add(new { type = "FunctionCall", name = fcc.Name, callId = fcc.CallId });
+                        }
+                        else if (content is FunctionResultContent frc)
+                        {
+                            contents.Add(new { type = "FunctionResult", callId = frc.CallId, result = frc.Result?.ToString() });
+                        }
+                        else if (content is UsageContent uc)
+                        {
+                            contents.Add(new { type = "Usage", inputTokens = uc.Details?.InputTokenCount ?? 0, outputTokens = uc.Details?.OutputTokenCount ?? 0 });
+                        }
+                    }
+                    if (contents.Count > 0)
+                        obj["contents"] = contents;
+                }
+
+                yield return System.Text.Json.JsonSerializer.Serialize(obj);
+            }
+        }
+
+        // ──────────────────────── MCP Heartbeat & Reconnection ────────────────────────
+
+        private void StartMcpHeartbeat()
+        {
+            StopMcpHeartbeat();
+            _heartbeatCts = new CancellationTokenSource();
+            _ = McpHeartbeatLoopAsync(_heartbeatCts.Token);
+        }
+
+        private void StopMcpHeartbeat()
+        {
+            if (_heartbeatCts != null)
+            {
+                try { _heartbeatCts.Cancel(); } catch { }
+                _heartbeatCts.Dispose();
+                _heartbeatCts = null;
+            }
+        }
+
+        /// <summary>
+        /// Periodically health-checks connected MCP servers. On failure, attempts reconnection.
+        /// Runs every 30 seconds. Only checks external (non-local) servers since local servers
+        /// are managed by the LiveLinkManager lifecycle.
+        /// </summary>
+        private async Task McpHeartbeatLoopAsync(CancellationToken ct)
+        {
+            const int heartbeatIntervalMs = 30000;
+            const int maxReconnectAttempts = 3;
+
+            while (!ct.IsCancellationRequested && _isInitialized)
+            {
+                try
+                {
+                    await Task.Delay(heartbeatIntervalMs, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { break; }
+
+                if (!_isInitialized) break;
+
+                // Snapshot the server list.
+                List<ConnectedMcpServer> servers;
+                lock (_connectedServers)
+                {
+                    servers = new List<ConnectedMcpServer>(_connectedServers);
+                }
+
+                foreach (ConnectedMcpServer server in servers)
+                {
+                    if (server.IsLocal || server.Client == null) continue;
+
+                    try
+                    {
+                        // Lightweight health check — list tools.
+                        await server.Client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        DispatchToMainThread(() => OnConnectionLost.Invoke(
+                            string.Format("MCP server '{0}' connection lost: {1}", server.DisplayName, ex.Message)));
+
+                        // Attempt reconnection.
+                        bool restored = false;
+                        if (server.ExternalConfig != null)
+                        {
+                            for (int attempt = 0; attempt < maxReconnectAttempts && !ct.IsCancellationRequested; attempt++)
+                            {
+                                try
+                                {
+                                    int delayMs = 1000 * (1 << attempt);
+                                    await Task.Delay(delayMs, ct).ConfigureAwait(false);
+
+                                    // Re-create the MCP client from stored config.
+                                    McpClient newClient = await AgentMcpClientFactory.CreateExternalClientAsync(
+                                        server.ExternalConfig, ct).ConfigureAwait(false);
+
+                                    if (newClient != null)
+                                    {
+                                        server.Client = newClient;
+                                        restored = true;
+                                        DispatchToMainThread(() => OnConnectionRestored.Invoke(
+                                            string.Format("MCP server '{0}' reconnected.", server.DisplayName)));
+                                        break;
+                                    }
+                                }
+                                catch (OperationCanceledException) { throw; }
+                                catch { }
+                            }
+                        }
+
+                        if (!restored)
+                        {
+                            DispatchToMainThread(() => OnConnectionLost.Invoke(
+                                string.Format("MCP server '{0}' reconnection failed after {1} attempts.",
+                                    server.DisplayName, maxReconnectAttempts)));
+                        }
+                    }
+                }
+            }
+        }
+
         private async Task DisposeConnectionsAsync()
         {
+            // Dispose A2A clients.
+            for (int i = _connectedA2AAgents.Count - 1; i >= 0; i--)
+            {
+                ConnectedA2AAgent agent = _connectedA2AAgents[i];
+                if (agent?.Client != null)
+                {
+                    try
+                    {
+                        agent.Client.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogWarning(string.Format("[LiveLink-Agent] Failed to dispose A2A client '{0}': {1}",
+                            agent.DisplayName, ex.Message));
+                    }
+                }
+            }
+
+            _connectedA2AAgents.Clear();
+
+            // Dispose MCP clients.
             for (int i = _connectedServers.Count - 1; i >= 0; i--)
             {
                 ConnectedMcpServer server = _connectedServers[i];

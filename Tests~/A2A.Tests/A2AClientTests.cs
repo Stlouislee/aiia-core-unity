@@ -1,0 +1,832 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using LiveLink.Agent.A2A;
+using Xunit;
+
+namespace A2A.Tests
+{
+    public class A2AClientTests
+    {
+        private static readonly JsonSerializerOptions s_jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+        };
+
+        private static readonly Uri s_testEndpoint = new Uri("https://test-agent.example.com/a2a");
+        private static readonly Uri s_testHost = new Uri("https://test-agent.example.com");
+
+        // ───────────────────── Agent Card Discovery ─────────────────────
+
+        [Fact]
+        public async Task GetAgentCardAsync_ReturnsCard()
+        {
+            string cardJson = JsonSerializer.Serialize(new A2AAgentCard
+            {
+                Name = "TestAgent",
+                Version = "1.0.0",
+                Description = "A test agent",
+                SupportedInterfaces = new List<A2AInterface>
+                {
+                    new A2AInterface { Url = "https://test-agent.example.com/a2a", ProtocolBinding = "HTTP+JSON" }
+                },
+                Capabilities = new A2ACapabilities { Streaming = true }
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+            {
+                Assert.Equal(HttpMethod.Get, req.Method);
+                Assert.EndsWith("/.well-known/agent-card.json", req.RequestUri.AbsolutePath);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(cardJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            A2AAgentCard card = await A2AClientTestExtensions.GetAgentCardAsync(s_testHost, handler: handler);
+
+            Assert.Equal("TestAgent", card.Name);
+            Assert.Equal("1.0.0", card.Version);
+            Assert.True(card.Capabilities.Streaming);
+        }
+
+        [Fact]
+        public async Task GetAgentCardAsync_ServerError_Throws()
+        {
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.InternalServerError));
+
+            await Assert.ThrowsAsync<HttpRequestException>(
+                () => A2AClientTestExtensions.GetAgentCardAsync(s_testHost, handler: handler));
+        }
+
+        // ───────────────────── Send Message (Synchronous) ─────────────────────
+
+        [Fact]
+        public async Task SendMessageAsync_ReturnsSendMessageResult()
+        {
+            // v1.0: response is wrapped in SendMessageResult with message field
+            var resultWrapper = new A2ASendMessageResult
+            {
+                Message = new A2AMessage
+                {
+                    MessageId = "resp-1",
+                    Role = "ROLE_AGENT",
+                    Parts = new List<A2APart> { A2APart.FromText("Hello from agent!") }
+                }
+            };
+
+            string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "test-req",
+                Result = JsonSerializer.SerializeToElement(resultWrapper, s_jsonOptions)
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+            {
+                Assert.Equal(HttpMethod.Post, req.Method);
+                Assert.Equal(s_testEndpoint, req.RequestUri);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                A2ASendMessageResult result = await client.SendMessageAsync(
+                    A2AMessage.CreateUserTextMessage("Hi!"));
+
+                Assert.NotNull(result);
+                Assert.NotNull(result.Message);
+                Assert.Null(result.Task);
+                Assert.Equal("ROLE_AGENT", result.Message.Role);
+                Assert.Equal("Hello from agent!", result.Message.Parts[0].Text);
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_WithTaskResponse_ReturnsTask()
+        {
+            // v1.0: server may return a Task instead of a Message
+            var resultWrapper = new A2ASendMessageResult
+            {
+                Task = new A2ATask
+                {
+                    Id = "task-001",
+                    ContextId = "ctx-1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Submitted }
+                }
+            };
+
+            string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "test-req",
+                Result = JsonSerializer.SerializeToElement(resultWrapper, s_jsonOptions)
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                A2ASendMessageResult result = await client.SendMessageAsync(
+                    A2AMessage.CreateUserTextMessage("start task"));
+
+                Assert.NotNull(result);
+                Assert.NotNull(result.Task);
+                Assert.Null(result.Message);
+                Assert.Equal("task-001", result.Task.Id);
+                Assert.Equal(A2ATaskState.Submitted, result.Task.Status.State);
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_ErrorResponse_Throws()
+        {
+            string errorJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "test-req",
+                Error = new JsonRpcError { Code = -32600, Message = "Invalid Request" }
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(errorJson, Encoding.UTF8, "application/json")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => client.SendMessageAsync(A2AMessage.CreateUserTextMessage("Hi!")));
+
+                Assert.Contains("-32600", ex.Message);
+                Assert.Contains("Invalid Request", ex.Message);
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_ServerError_Throws()
+        {
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                await Assert.ThrowsAsync<HttpRequestException>(
+                    () => client.SendMessageAsync(A2AMessage.CreateUserTextMessage("Hi!")));
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_SendsCorrectPayload()
+        {
+            string capturedBody = null;
+
+            var handler = new MockHttpHandler(req =>
+            {
+                capturedBody = req.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                var resultWrapper = new A2ASendMessageResult
+                {
+                    Message = A2AMessage.CreateUserTextMessage("ok")
+                };
+                string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+                {
+                    Id = "test",
+                    Result = JsonSerializer.SerializeToElement(resultWrapper, s_jsonOptions)
+                }, s_jsonOptions);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                await client.SendMessageAsync(A2AMessage.CreateUserTextMessage("test payload"));
+            }
+
+            Assert.NotNull(capturedBody);
+            using (JsonDocument doc = JsonDocument.Parse(capturedBody))
+            {
+                // Must be JSON-RPC 2.0 format with PascalCase method name
+                Assert.Equal("2.0", doc.RootElement.GetProperty("jsonrpc").GetString());
+                Assert.Equal("SendMessage", doc.RootElement.GetProperty("method").GetString());
+                Assert.True(doc.RootElement.TryGetProperty("id", out _));
+
+                string text = doc.RootElement
+                    .GetProperty("params")
+                    .GetProperty("message")
+                    .GetProperty("parts")[0]
+                    .GetProperty("text")
+                    .GetString();
+                Assert.Equal("test payload", text);
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_IncludesCustomHeaders()
+        {
+            string capturedAuth = null;
+
+            var handler = new MockHttpHandler(req =>
+            {
+                capturedAuth = req.Headers.Contains("Authorization")
+                    ? string.Join(",", req.Headers.GetValues("Authorization"))
+                    : null;
+                var resultWrapper = new A2ASendMessageResult
+                {
+                    Message = A2AMessage.CreateUserTextMessage("ok")
+                };
+                string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+                {
+                    Id = "test",
+                    Result = JsonSerializer.SerializeToElement(resultWrapper, s_jsonOptions)
+                }, s_jsonOptions);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            var headers = new Dictionary<string, string>
+            {
+                ["Authorization"] = "Bearer test-token-123"
+            };
+
+            using (var client = new A2AClient(s_testEndpoint, handler, headers))
+            {
+                await client.SendMessageAsync(A2AMessage.CreateUserTextMessage("hi"));
+            }
+
+            Assert.Equal("Bearer test-token-123", capturedAuth);
+        }
+
+        // ───────────────────── GetTask ─────────────────────
+
+        [Fact]
+        public async Task GetTaskAsync_ReturnsTask()
+        {
+            var task = new A2ATask
+            {
+                Id = "task-42",
+                ContextId = "ctx-1",
+                Status = new A2ATaskStatus { State = A2ATaskState.Completed },
+                Artifacts = new List<A2AArtifact>
+                {
+                    new A2AArtifact
+                    {
+                        ArtifactId = "art-1",
+                        Name = "result",
+                        Parts = new List<A2APart> { A2APart.FromText("done") }
+                    }
+                }
+            };
+
+            string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "get-req",
+                Result = JsonSerializer.SerializeToElement(task, s_jsonOptions)
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+            {
+                Assert.Equal(HttpMethod.Post, req.Method);
+                Assert.Equal(s_testEndpoint, req.RequestUri);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                A2ATask result = await client.GetTaskAsync(
+                    new GetTaskRequest { Id = "task-42" });
+
+                Assert.NotNull(result);
+                Assert.Equal("task-42", result.Id);
+                Assert.Equal("ctx-1", result.ContextId);
+                Assert.Equal(A2ATaskState.Completed, result.Status.State);
+                Assert.Single(result.Artifacts);
+                Assert.Equal("done", result.Artifacts[0].Parts[0].Text);
+            }
+        }
+
+        [Fact]
+        public async Task GetTaskAsync_SendsCorrectPayload()
+        {
+            string capturedBody = null;
+
+            var handler = new MockHttpHandler(req =>
+            {
+                capturedBody = req.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                var task = new A2ATask
+                {
+                    Id = "task-1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Working }
+                };
+                string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+                {
+                    Id = "test",
+                    Result = JsonSerializer.SerializeToElement(task, s_jsonOptions)
+                }, s_jsonOptions);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                await client.GetTaskAsync(new GetTaskRequest { Id = "task-1", HistoryLength = 5 });
+            }
+
+            Assert.NotNull(capturedBody);
+            using (JsonDocument doc = JsonDocument.Parse(capturedBody))
+            {
+                Assert.Equal("2.0", doc.RootElement.GetProperty("jsonrpc").GetString());
+                Assert.Equal("tasks/get", doc.RootElement.GetProperty("method").GetString());
+                Assert.Equal("task-1", doc.RootElement.GetProperty("params").GetProperty("id").GetString());
+                Assert.Equal(5, doc.RootElement.GetProperty("params").GetProperty("historyLength").GetInt32());
+            }
+        }
+
+        [Fact]
+        public async Task GetTaskAsync_ErrorResponse_Throws()
+        {
+            string errorJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "get-req",
+                Error = new JsonRpcError { Code = -32001, Message = "Task not found" }
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(errorJson, Encoding.UTF8, "application/json")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => client.GetTaskAsync(new GetTaskRequest { Id = "nonexistent" }));
+
+                Assert.Contains("-32001", ex.Message);
+                Assert.Contains("Task not found", ex.Message);
+            }
+        }
+
+        [Fact]
+        public async Task GetTaskAsync_Disposed_ThrowsObjectDisposed()
+        {
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK));
+
+            var client = new A2AClient(s_testEndpoint, handler);
+            client.Dispose();
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(
+                () => client.GetTaskAsync(new GetTaskRequest { Id = "t1" }));
+        }
+
+        // ───────────────────── CancelTask ─────────────────────
+
+        [Fact]
+        public async Task CancelTaskAsync_ReturnsCanceledTask()
+        {
+            var task = new A2ATask
+            {
+                Id = "task-99",
+                ContextId = "ctx-1",
+                Status = new A2ATaskStatus
+                {
+                    State = A2ATaskState.Canceled,
+                    Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                }
+            };
+
+            string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "cancel-req",
+                Result = JsonSerializer.SerializeToElement(task, s_jsonOptions)
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+            {
+                Assert.Equal(HttpMethod.Post, req.Method);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                A2ATask result = await client.CancelTaskAsync(
+                    new CancelTaskRequest { Id = "task-99" });
+
+                Assert.NotNull(result);
+                Assert.Equal("task-99", result.Id);
+                Assert.Equal(A2ATaskState.Canceled, result.Status.State);
+            }
+        }
+
+        [Fact]
+        public async Task CancelTaskAsync_SendsCorrectPayload()
+        {
+            string capturedBody = null;
+
+            var handler = new MockHttpHandler(req =>
+            {
+                capturedBody = req.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                var task = new A2ATask
+                {
+                    Id = "t1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Canceled }
+                };
+                string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+                {
+                    Id = "test",
+                    Result = JsonSerializer.SerializeToElement(task, s_jsonOptions)
+                }, s_jsonOptions);
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                await client.CancelTaskAsync(new CancelTaskRequest { Id = "t1" });
+            }
+
+            Assert.NotNull(capturedBody);
+            using (JsonDocument doc = JsonDocument.Parse(capturedBody))
+            {
+                Assert.Equal("2.0", doc.RootElement.GetProperty("jsonrpc").GetString());
+                Assert.Equal("tasks/cancel", doc.RootElement.GetProperty("method").GetString());
+                Assert.Equal("t1", doc.RootElement.GetProperty("params").GetProperty("id").GetString());
+            }
+        }
+
+        [Fact]
+        public async Task CancelTaskAsync_TaskNotCancelable_Throws()
+        {
+            string errorJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "cancel-req",
+                Error = new JsonRpcError { Code = -32002, Message = "Task is already in a terminal state" }
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(errorJson, Encoding.UTF8, "application/json")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => client.CancelTaskAsync(new CancelTaskRequest { Id = "completed-task" }));
+
+                Assert.Contains("-32002", ex.Message);
+                Assert.Contains("terminal state", ex.Message);
+            }
+        }
+
+        [Fact]
+        public async Task CancelTaskAsync_Disposed_ThrowsObjectDisposed()
+        {
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK));
+
+            var client = new A2AClient(s_testEndpoint, handler);
+            client.Dispose();
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(
+                () => client.CancelTaskAsync(new CancelTaskRequest { Id = "t1" }));
+        }
+
+        // ───────────────────── Streaming ─────────────────────
+
+        [Fact]
+        public async Task SendMessageStreamingAsync_ReceivesStreamResponses()
+        {
+            // v1.0: SSE events contain StreamResponse wrapper in JSON-RPC result
+            var chunk1 = new A2AStreamResponse
+            {
+                Message = new A2AMessage
+                {
+                    MessageId = "r1", Role = "ROLE_AGENT",
+                    Parts = new List<A2APart> { A2APart.FromText("Hello") }
+                }
+            };
+
+            var chunk2 = new A2AStreamResponse
+            {
+                Message = new A2AMessage
+                {
+                    MessageId = "r2", Role = "ROLE_AGENT",
+                    Parts = new List<A2APart> { A2APart.FromText(" World") }
+                }
+            };
+
+            var complete = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1",
+                    ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+                }
+            };
+
+            string chunk1Json = ToJsonRpcResult(chunk1, "stream-req");
+            string chunk2Json = ToJsonRpcResult(chunk2, "stream-req");
+            string completeJson = ToJsonRpcResult(complete, "stream-req");
+
+            string ssePayload =
+                "event: message\n" +
+                "data: " + chunk1Json + "\n" +
+                "\n" +
+                "event: message\n" +
+                "data: " + chunk2Json + "\n" +
+                "\n" +
+                "event: complete\n" +
+                "data: " + completeJson + "\n" +
+                "\n";
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(ssePayload, Encoding.UTF8, "text/event-stream")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                var textChunks = new List<string>();
+
+                List<A2AStreamResponse> events = await client.SendMessageStreamingAsync(
+                    A2AMessage.CreateUserTextMessage("stream test"),
+                    onStreamEvent: evt =>
+                    {
+                        if (evt.Message?.Parts != null)
+                        {
+                            foreach (var part in evt.Message.Parts)
+                            {
+                                if (part.Kind == PartKind.Text) textChunks.Add(part.Text);
+                            }
+                        }
+                    });
+
+                Assert.Equal(3, events.Count);
+                Assert.NotNull(events[0].Message);
+                Assert.Equal("Hello", events[0].Message.Parts[0].Text);
+                Assert.NotNull(events[1].Message);
+                Assert.Equal(" World", events[1].Message.Parts[0].Text);
+                Assert.NotNull(events[2].StatusUpdate);
+                Assert.Equal(A2ATaskState.Completed, events[2].StatusUpdate.Status.State);
+                Assert.Equal(new[] { "Hello", " World" }, textChunks.ToArray());
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageStreamingAsync_EmptyStream_ReturnsEmptyList()
+        {
+            // Only a terminal status event, no message events
+            var complete = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1", ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+                }
+            };
+            string ssePayload = "event: complete\ndata: " + ToJsonRpcResult(complete, "req") + "\n\n";
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(ssePayload, Encoding.UTF8, "text/event-stream")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                List<A2AStreamResponse> events = await client.SendMessageStreamingAsync(
+                    A2AMessage.CreateUserTextMessage("test"));
+
+                Assert.Single(events);
+                Assert.NotNull(events[0].StatusUpdate);
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageStreamingAsync_MultiLineData_JoinsWithNewline()
+        {
+            var msg = new A2AStreamResponse
+            {
+                Message = new A2AMessage
+                {
+                    MessageId = "r1", Role = "ROLE_AGENT",
+                    Parts = new List<A2APart> { A2APart.FromText("hello world") }
+                }
+            };
+            string rpcJson = ToJsonRpcResult(msg, "ml-req");
+
+            int splitPoint = rpcJson.IndexOf("\"id\"");
+            string part1 = rpcJson.Substring(0, splitPoint);
+            string part2 = rpcJson.Substring(splitPoint);
+
+            var complete = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1", ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+                }
+            };
+
+            string ssePayload =
+                "event: message\n" +
+                "data: " + part1 + "\n" +
+                "data: " + part2 + "\n" +
+                "\n" +
+                "event: complete\n" +
+                "data: " + ToJsonRpcResult(complete, "ml-req") + "\n" +
+                "\n";
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(ssePayload, Encoding.UTF8, "text/event-stream")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                List<A2AStreamResponse> events = await client.SendMessageStreamingAsync(
+                    A2AMessage.CreateUserTextMessage("multi-line test"));
+
+                Assert.Equal(2, events.Count);
+                Assert.Equal("hello world", events[0].Message.Parts[0].Text);
+            }
+        }
+
+        // ───────────────────── Disposal ─────────────────────
+
+        [Fact]
+        public async Task Dispose_ThenSendMessage_ThrowsObjectDisposed()
+        {
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK));
+
+            var client = new A2AClient(s_testEndpoint, handler);
+            client.Dispose();
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(
+                () => client.SendMessageAsync(A2AMessage.CreateUserTextMessage("hi")));
+        }
+
+        // ───────────────────── Reconnection ─────────────────────
+
+        [Fact]
+        public async Task SendMessageStreamingAsync_ConnectionDropped_ReconnectsAndCollectsAllChunks()
+        {
+            int callCount = 0;
+
+            var chunk1 = new A2AStreamResponse
+            {
+                Message = new A2AMessage
+                {
+                    MessageId = "r1", Role = "ROLE_AGENT",
+                    Parts = new List<A2APart> { A2APart.FromText("chunk1") }
+                }
+            };
+
+            var chunk2 = new A2AStreamResponse
+            {
+                Message = new A2AMessage
+                {
+                    MessageId = "r2", Role = "ROLE_AGENT",
+                    Parts = new List<A2APart> { A2APart.FromText("chunk2") }
+                }
+            };
+
+            var complete = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1", ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+                }
+            };
+
+            string completeSse =
+                "event: message\n" +
+                "data: " + ToJsonRpcResult(chunk1, "reconnect") + "\n" +
+                "\n" +
+                "event: message\n" +
+                "data: " + ToJsonRpcResult(chunk2, "reconnect") + "\n" +
+                "\n" +
+                "event: complete\n" +
+                "data: " + ToJsonRpcResult(complete, "reconnect") + "\n" +
+                "\n";
+
+            var handler = new MockHttpHandler(req =>
+            {
+                callCount++;
+                if (callCount == 1)
+                {
+                    return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+                }
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(completeSse, Encoding.UTF8, "text/event-stream")
+                };
+            });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                List<A2AStreamResponse> events = await client.SendMessageStreamingAsync(
+                    A2AMessage.CreateUserTextMessage("reconnect test"));
+
+                Assert.Equal(3, events.Count);
+                Assert.Equal("chunk1", events[0].Message.Parts[0].Text);
+                Assert.Equal("chunk2", events[1].Message.Parts[0].Text);
+                Assert.NotNull(events[2].StatusUpdate);
+                Assert.True(callCount >= 2, "Client should have reconnected at least once");
+            }
+        }
+
+        // ───────────────────── Certificate Validation ─────────────────────
+
+        [Fact]
+        public void CreateHandlerWithCertificateValidation_NullValidator_ReturnsDefaultHandler()
+        {
+            var handler = A2AClient.CreateHandlerWithCertificateValidation(null);
+            Assert.NotNull(handler);
+            handler.Dispose();
+        }
+
+        [Fact]
+        public void CreateHandlerWithCertificateValidation_WithValidator_SetsCallback()
+        {
+            var handler = A2AClient.CreateHandlerWithCertificateValidation(
+                (request, cert, chain, errors) => true);
+
+            Assert.NotNull(handler);
+            handler.Dispose();
+        }
+
+        // ───────────────────── Helpers ─────────────────────
+
+        private static string ToJsonRpcResult(object obj, string id)
+        {
+            var rpc = new JsonRpcResponse
+            {
+                Id = id,
+                Result = JsonSerializer.SerializeToElement(obj, s_jsonOptions)
+            };
+            return JsonSerializer.Serialize(rpc, s_jsonOptions);
+        }
+
+        private class MockHttpHandler : HttpMessageHandler
+        {
+            private readonly Func<HttpRequestMessage, HttpResponseMessage> _responder;
+
+            public MockHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> responder)
+            {
+                _responder = responder;
+            }
+
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                return Task.FromResult(_responder(request));
+            }
+        }
+    }
+
+    internal static class A2AClientTestExtensions
+    {
+        public static Task<A2AAgentCard> GetAgentCardAsync(
+            Uri host,
+            Dictionary<string, string> headers = null,
+            float timeoutSeconds = 30f,
+            HttpMessageHandler handler = null)
+        {
+            return A2AClient.GetAgentCardAsync(host, headers, timeoutSeconds, handler);
+        }
+    }
+}

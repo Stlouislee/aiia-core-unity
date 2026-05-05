@@ -7,12 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-05
+
 ### Added
 
 - Build-time dynamic tool cache pipeline:
   - New `LiveLinkToolCacheAsset` to store pre-computed attribute-discovered MCP tools.
   - New `LiveLinkToolCacheBuilder` editor/build hook (`LiveLink > Rebuild Tool Cache`, plus pre-build refresh).
 - `LiveLinkManager` now supports assigning a tool cache asset for dynamic MCP discovery.
+
+#### A2A (Agent-to-Agent) Protocol Support
+
+- **A2A Client** (`Runtime/Agent/A2A/`): delegate tasks to remote A2A-compliant agents (OpenClaw, Hermes, etc.)
+  - `A2AClient` — lightweight HTTP+JSON client (IL2CPP-compatible, no external deps)
+  - `A2AAgentToolWrapper` — wraps remote A2A agents as callable `AIFunction` tools
+  - `AgentA2ARemoteConfig` — serializable Inspector config for remote agents
+  - Agent card discovery via `/.well-known/agent-card.json`
+  - SSE streaming with automatic reconnection (exponential backoff)
+- **A2A Host Server** (`Runtime/Agent/A2A/A2AHostServer.cs`): expose Unity agent as discoverable A2A endpoint
+  - `GET /.well-known/agent-card.json` — agent discovery
+  - `POST /a2a` — receive messages, return agent responses (sync + SSE streaming)
+  - `GET /health` — health check
+  - Bearer token authentication, IP rate limiting, CORS support
+  - Configurable via `A2AHostConfig` in `AgentRuntimeConfig` Inspector
+- **Android/Quest platform compatibility**:
+  - Thread-safe logging (`[Conditional("UNITY_EDITOR")]` prevents background-thread crashes on IL2CPP)
+  - `link.xml` preserves `System.Text.Json` types from IL2CPP stripping
+  - Self-signed certificate support via `AcceptSelfSignedCertificates` config toggle
+- 48 unit tests for A2A types, client, host server, and tool wrapper
+
+### Fixed
+
+- **MCP client resilience** (Issue #46):
+  - Initialization now retries with exponential backoff (3 attempts)
+  - MCP connection heartbeat (30s) with automatic reconnection on failure
+  - `OnConnectionLost` / `OnConnectionRestored` events for UI integration
+  - `HttpWebRequest` replaced with cross-platform `HttpClient` for health probes
+  - `_isInitialized` / `_isBusy` fields now `volatile` for thread safety
+  - SSE transport override in Inspector now shows clear warning with fix instructions
+- HttpClient socket exhaustion in `GetAgentCardAsync` (now accepts optional handler)
+- SSE multi-line `data:` lines now joined with `\n` per SSE spec
+- `CancellationToken` now properly interrupts `ReadLineAsync` in SSE streaming
+- `_delegateToolPrefix` config now correctly wired to `A2AAgentToolWrapper`
+- Agent card interface selection now prefers `HTTP+JSON` protocol binding
 
 ### Changed
 
