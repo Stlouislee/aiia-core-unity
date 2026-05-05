@@ -89,6 +89,7 @@ namespace LiveLink.Agent
         private volatile bool _isBusy;
         private string _status = "Idle";
         private string _lastResponse;
+        private AgentResponse _lastAgentResponse;
         private string _lastError;
 
         private sealed class ConnectedMcpServer
@@ -118,6 +119,7 @@ namespace LiveLink.Agent
         public bool IsBusy => _isBusy;
         public string Status => _status;
         public string LastResponse => _lastResponse;
+        public AgentResponse LastAgentResponse => _lastAgentResponse;
         public string LastError => _lastError;
         public int ConnectedServerCount => _connectedServers.Count;
         public IReadOnlyList<string> AvailableToolNames => _availableToolNames.AsReadOnly();
@@ -390,7 +392,17 @@ namespace LiveLink.Agent
             SubmitMessage(message);
         }
 
-        public async Task<string> SendMessageAsync(string message, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// Runs the agent with the given message and returns a structured <see cref="AgentResponse"/>
+        /// containing all messages, tool calls, usage information, and finish reason.
+        /// </summary>
+        /// <remarks>
+        /// This is the primary API for interacting with the agent. It returns the full
+        /// <see cref="AgentResponse"/> from the Microsoft Agent Framework, giving callers
+        /// access to intermediate steps (<see cref="AgentResponse.Messages"/>), token usage
+        /// (<see cref="AgentResponse.Usage"/>), and finish reason (<see cref="AgentResponse.FinishReason"/>).
+        /// </remarks>
+        public async Task<AgentResponse> RunAsync(string message, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(message))
             {
@@ -413,11 +425,13 @@ namespace LiveLink.Agent
                     _session = await _agent.CreateSessionAsync().ConfigureAwait(false);
                 }
 
-                var response = await _agent.RunAsync(message, _session).ConfigureAwait(false);
-                _lastResponse = response != null ? response.ToString() : string.Empty;
+                AgentResponse response = await _agent.RunAsync(message, _session).ConfigureAwait(false);
+                _lastAgentResponse = response;
+                _lastResponse = response?.Text ?? string.Empty;
+
                 SetStatus("Response received.");
                 DispatchToMainThread(() => OnResponseReceived.Invoke(_lastResponse));
-                return _lastResponse;
+                return response;
             }
             catch (Exception ex)
             {
@@ -432,6 +446,94 @@ namespace LiveLink.Agent
                 _isBusy = false;
                 _runLock.Release();
             }
+        }
+
+        /// <summary>
+        /// Runs the agent with streaming enabled, yielding <see cref="AgentResponseUpdate"/>
+        /// chunks as they are produced. Each update may contain text, function calls,
+        /// function results, or other content types.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Streaming updates are typed — inspect <see cref="AgentResponseUpdate.Contents"/>
+        /// to distinguish between <see cref="TextContent"/>, <see cref="FunctionCallContent"/>,
+        /// and <see cref="FunctionResultContent"/>.
+        /// </para>
+        /// <para>
+        /// The caller must consume the full stream. Partial consumption may leave the agent
+        /// in an inconsistent state.
+        /// </para>
+        /// </remarks>
+        public async IAsyncEnumerable<AgentResponseUpdate> RunStreamingAsync(
+            string message,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                throw new ArgumentException("Message cannot be empty.", nameof(message));
+            }
+
+            if (!_isInitialized)
+            {
+                await InitializeAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await _runLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                _isBusy = true;
+                SetStatus("Streaming agent response...");
+
+                if (_session == null)
+                {
+                    _session = await _agent.CreateSessionAsync().ConfigureAwait(false);
+                }
+
+                var sb = new StringBuilder();
+
+                await foreach (AgentResponseUpdate update in _agent.RunStreamingAsync(message, _session, cancellationToken: cancellationToken).ConfigureAwait(false))
+                {
+                    // Accumulate text for LastResponse.
+                    if (update.Text != null)
+                    {
+                        sb.Append(update.Text);
+                    }
+
+                    // Fire OnToolCall for function call content.
+                    foreach (var content in update.Contents ?? System.Array.Empty<AIContent>())
+                    {
+                        if (content is FunctionCallContent fcc)
+                        {
+                            string toolName = fcc.Name ?? "(unknown)";
+                            string toolArgs = fcc.Arguments != null
+                                ? System.Text.Json.JsonSerializer.Serialize(fcc.Arguments)
+                                : "{}";
+                            DispatchToMainThread(() => OnToolCall.Invoke(toolName, toolArgs));
+                        }
+                    }
+
+                    yield return update;
+                }
+
+                _lastResponse = sb.ToString();
+                SetStatus("Response received.");
+                DispatchToMainThread(() => OnResponseReceived.Invoke(_lastResponse));
+            }
+            finally
+            {
+                _isBusy = false;
+                _runLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Sends a message and returns the aggregated text response.
+        /// Convenience wrapper around <see cref="RunAsync"/> for backward compatibility.
+        /// </summary>
+        public async Task<string> SendMessageAsync(string message, CancellationToken cancellationToken = default)
+        {
+            AgentResponse response = await RunAsync(message, cancellationToken).ConfigureAwait(false);
+            return response.Text;
         }
 
         public async Task ShutdownAsync()
