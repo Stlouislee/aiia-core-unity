@@ -993,7 +993,7 @@ namespace LiveLink.Agent
                     try
                     {
                         // Lightweight health check — list tools.
-                        await server.Client.ListToolsAsync(ct).ConfigureAwait(false);
+                        await server.Client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
