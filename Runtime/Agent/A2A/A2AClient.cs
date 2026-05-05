@@ -145,9 +145,10 @@ namespace LiveLink.Agent.A2A
         }
 
         /// <summary>
-        /// Send a synchronous message to the remote A2A agent using JSON-RPC 2.0 "message/send".
+        /// Send a synchronous message to the remote A2A agent using JSON-RPC 2.0 "SendMessage".
+        /// Returns a SendMessageResult containing either a Task or a Message per A2A v1.0 spec.
         /// </summary>
-        public async Task<A2AMessage> SendMessageAsync(
+        public async Task<A2ASendMessageResult> SendMessageAsync(
             A2AMessage message,
             CancellationToken cancellationToken = default)
         {
@@ -183,7 +184,7 @@ namespace LiveLink.Agent.A2A
 
                 if (rpcResponse?.Result.HasValue == true)
                 {
-                    return rpcResponse.Result.Value.Deserialize<A2AMessage>(s_jsonOptions);
+                    return rpcResponse.Result.Value.Deserialize<A2ASendMessageResult>(s_jsonOptions);
                 }
 
                 return null;
@@ -191,14 +192,13 @@ namespace LiveLink.Agent.A2A
         }
 
         /// <summary>
-        /// Send a streaming message using JSON-RPC 2.0 "message/stream" method.
-        /// Chunks arrive via the callback as SSE events.
+        /// Send a streaming message using JSON-RPC 2.0 "SendStreamingMessage" method.
+        /// Each SSE event is a StreamResponse containing task/message/statusUpdate/artifactUpdate.
         /// Automatically reconnects on connection drops (up to <see cref="MaxReconnectAttempts"/>).
-        /// Returns the aggregated list of message chunks.
         /// </summary>
-        public async Task<List<A2AMessage>> SendMessageStreamingAsync(
+        public async Task<List<A2AStreamResponse>> SendMessageStreamingAsync(
             A2AMessage message,
-            Action<A2AMessage> onMessageChunk = null,
+            Action<A2AStreamResponse> onStreamEvent = null,
             CancellationToken cancellationToken = default)
         {
             ThrowIfDisposed();
@@ -214,7 +214,7 @@ namespace LiveLink.Agent.A2A
 
             Log("Sending streaming message to {0} ({1})", _endpoint, message.MessageId);
 
-            var messages = new List<A2AMessage>();
+            var events = new List<A2AStreamResponse>();
             int attempt = 0;
 
             while (attempt <= MaxReconnectAttempts && !cancellationToken.IsCancellationRequested)
@@ -222,12 +222,12 @@ namespace LiveLink.Agent.A2A
                 try
                 {
                     bool connected = await ConnectAndReadStreamAsync(
-                        json, messages, onMessageChunk, cancellationToken).ConfigureAwait(false);
+                        json, events, onStreamEvent, cancellationToken).ConfigureAwait(false);
 
                     if (connected)
                     {
                         // Stream completed normally (server sent complete event or closed).
-                        return messages;
+                        return events;
                     }
 
                     // Connection dropped unexpectedly — attempt reconnect.
@@ -272,7 +272,7 @@ namespace LiveLink.Agent.A2A
                 }
             }
 
-            return messages;
+            return events;
         }
 
         public void Dispose()
@@ -290,8 +290,8 @@ namespace LiveLink.Agent.A2A
         /// </summary>
         private async Task<bool> ConnectAndReadStreamAsync(
             string requestJson,
-            List<A2AMessage> messages,
-            Action<A2AMessage> onMessageChunk,
+            List<A2AStreamResponse> events,
+            Action<A2AStreamResponse> onStreamEvent,
             CancellationToken cancellationToken)
         {
             var content = new StringContent(requestJson, Encoding.UTF8, "application/json");
@@ -346,7 +346,7 @@ namespace LiveLink.Agent.A2A
                             {
                                 // Blank line = end of SSE event. Join multi-line data with \n.
                                 string data = string.Join("\n", dataLines);
-                                bool isComplete = ProcessSseEvent(eventType, data, messages, onMessageChunk);
+                                bool isComplete = ProcessSseEvent(eventType, data, events, onStreamEvent);
                                 eventType = null;
                                 dataLines.Clear();
 
@@ -362,7 +362,7 @@ namespace LiveLink.Agent.A2A
                     if (dataLines.Count > 0)
                     {
                         string data = string.Join("\n", dataLines);
-                        ProcessSseEvent(eventType, data, messages, onMessageChunk);
+                        ProcessSseEvent(eventType, data, events, onStreamEvent);
                     }
                 }
             }
@@ -385,53 +385,55 @@ namespace LiveLink.Agent.A2A
         }
 
         /// <summary>
-        /// Processes a single SSE event. Returns true if the event was a "complete" event.
-        /// Message events are now JSON-RPC 2.0 responses with the A2AMessage in the result field.
+        /// Processes a single SSE event. Returns true if the event was a terminal event.
+        /// Each data payload is a JSON-RPC 2.0 response wrapping a StreamResponse (v1.0).
         /// </summary>
         private static bool ProcessSseEvent(
             string eventType,
             string data,
-            List<A2AMessage> messages,
-            Action<A2AMessage> onMessageChunk)
+            List<A2AStreamResponse> events,
+            Action<A2AStreamResponse> onStreamEvent)
         {
             if (string.IsNullOrEmpty(data)) return false;
 
             try
             {
-                if (string.Equals(eventType, "message", StringComparison.OrdinalIgnoreCase)
-                    || string.IsNullOrEmpty(eventType))
-                {
-                    // Try JSON-RPC 2.0 response format first
-                    JsonRpcResponse rpcResponse = JsonSerializer
-                        .Deserialize<JsonRpcResponse>(data, s_jsonOptions);
+                // All events (including "complete") are now JSON-RPC 2.0 responses
+                // wrapping a StreamResponse in the result field.
+                JsonRpcResponse rpcResponse = JsonSerializer
+                    .Deserialize<JsonRpcResponse>(data, s_jsonOptions);
 
-                    if (rpcResponse?.Result.HasValue == true)
+                if (rpcResponse?.Result.HasValue == true)
+                {
+                    A2AStreamResponse streamResp = rpcResponse.Result.Value
+                        .Deserialize<A2AStreamResponse>(s_jsonOptions);
+                    if (streamResp != null)
                     {
-                        A2AMessage msg = rpcResponse.Result.Value
-                            .Deserialize<A2AMessage>(s_jsonOptions);
-                        if (msg != null)
+                        events.Add(streamResp);
+                        onStreamEvent?.Invoke(streamResp);
+
+                        // Check if this is a terminal status update
+                        if (streamResp.StatusUpdate?.Status?.State == A2ATaskState.Completed
+                            || streamResp.StatusUpdate?.Status?.State == A2ATaskState.Failed
+                            || streamResp.StatusUpdate?.Status?.State == A2ATaskState.Canceled
+                            || streamResp.StatusUpdate?.Status?.State == A2ATaskState.Rejected)
                         {
-                            messages.Add(msg);
-                            onMessageChunk?.Invoke(msg);
+                            Log("Streaming terminal state: {0}", streamResp.StatusUpdate.Status.State);
+                            return true;
                         }
                     }
-                    else if (rpcResponse?.Error != null)
-                    {
-                        LogError("Streaming JSON-RPC error {0}: {1}",
-                            rpcResponse.Error.Code, rpcResponse.Error.Message);
-                    }
+                }
+                else if (rpcResponse?.Error != null)
+                {
+                    LogError("Streaming JSON-RPC error {0}: {1}",
+                        rpcResponse.Error.Code, rpcResponse.Error.Message);
+                }
 
-                    return false;
-                }
-                else if (string.Equals(eventType, "complete", StringComparison.OrdinalIgnoreCase))
+                // Legacy: handle "complete" event type for backward compatibility
+                if (string.Equals(eventType, "complete", StringComparison.OrdinalIgnoreCase))
                 {
-                    Log("Streaming complete");
+                    Log("Streaming complete (legacy event)");
                     return true;
-                }
-                else if (string.Equals(eventType, "error", StringComparison.OrdinalIgnoreCase))
-                {
-                    LogError("Streaming error: {0}", data);
-                    return false;
                 }
             }
             catch (Exception ex)

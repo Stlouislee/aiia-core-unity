@@ -533,6 +533,20 @@ namespace LiveLink.Agent.A2A
         public A2ATaskArtifactUpdateEvent ArtifactUpdate { get; set; }
     }
 
+    /// <summary>
+    /// Response wrapper for the SendMessage method (v1.0).
+    /// Contains one of: Task or Message.
+    /// Ref: A2A spec section 9.4.1, proto SendMessageResponse
+    /// </summary>
+    public class A2ASendMessageResult
+    {
+        [JsonPropertyName("task")]
+        public A2ATask Task { get; set; }
+
+        [JsonPropertyName("message")]
+        public A2AMessage Message { get; set; }
+    }
+
     // ───────────────────── JSON-RPC 2.0 Envelope Types ─────────────────────
 
     /// <summary>

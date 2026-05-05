@@ -100,11 +100,16 @@ namespace LiveLink.Agent.A2A
                         .ConfigureAwait(false);
                 }
 
-                A2AMessage response = await _client
+                A2ASendMessageResult result = await _client
                     .SendMessageAsync(a2aMessage, cancellationToken)
                     .ConfigureAwait(false);
 
-                return ExtractText(response);
+                // Extract text from whichever payload is present
+                if (result?.Message != null)
+                    return ExtractText(result.Message);
+                if (result?.Task?.Status?.Message != null)
+                    return ExtractText(result.Task.Status.Message);
+                return string.Empty;
             }
             catch (Exception ex)
             {
@@ -124,12 +129,15 @@ namespace LiveLink.Agent.A2A
 
             await _client.SendMessageStreamingAsync(
                 message,
-                onMessageChunk: chunk =>
+                onStreamEvent: evt =>
                 {
-                    string text = ExtractText(chunk);
-                    if (!string.IsNullOrEmpty(text))
+                    if (evt.Message != null)
                     {
-                        chunks.Add(text);
+                        string text = ExtractText(evt.Message);
+                        if (!string.IsNullOrEmpty(text))
+                        {
+                            chunks.Add(text);
+                        }
                     }
                 },
                 cancellationToken: cancellationToken).ConfigureAwait(false);

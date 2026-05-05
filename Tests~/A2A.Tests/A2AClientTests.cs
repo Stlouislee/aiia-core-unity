@@ -70,19 +70,23 @@ namespace A2A.Tests
         // ───────────────────── Send Message (Synchronous) ─────────────────────
 
         [Fact]
-        public async Task SendMessageAsync_ReturnsResponse()
+        public async Task SendMessageAsync_ReturnsSendMessageResult()
         {
-            var resultMessage = new A2AMessage
+            // v1.0: response is wrapped in SendMessageResult with message field
+            var resultWrapper = new A2ASendMessageResult
             {
-                MessageId = "resp-1",
-                Role = "ROLE_AGENT",
-                Parts = new List<A2APart> { A2APart.FromText("Hello from agent!") }
+                Message = new A2AMessage
+                {
+                    MessageId = "resp-1",
+                    Role = "ROLE_AGENT",
+                    Parts = new List<A2APart> { A2APart.FromText("Hello from agent!") }
+                }
             };
 
             string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
             {
                 Id = "test-req",
-                Result = JsonSerializer.SerializeToElement(resultMessage, s_jsonOptions)
+                Result = JsonSerializer.SerializeToElement(resultWrapper, s_jsonOptions)
             }, s_jsonOptions);
 
             var handler = new MockHttpHandler(req =>
@@ -97,12 +101,53 @@ namespace A2A.Tests
 
             using (var client = new A2AClient(s_testEndpoint, handler))
             {
-                A2AMessage response = await client.SendMessageAsync(
+                A2ASendMessageResult result = await client.SendMessageAsync(
                     A2AMessage.CreateUserTextMessage("Hi!"));
 
-                Assert.NotNull(response);
-                Assert.Equal("ROLE_AGENT", response.Role);
-                Assert.Equal("Hello from agent!", response.Parts[0].Text);
+                Assert.NotNull(result);
+                Assert.NotNull(result.Message);
+                Assert.Null(result.Task);
+                Assert.Equal("ROLE_AGENT", result.Message.Role);
+                Assert.Equal("Hello from agent!", result.Message.Parts[0].Text);
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageAsync_WithTaskResponse_ReturnsTask()
+        {
+            // v1.0: server may return a Task instead of a Message
+            var resultWrapper = new A2ASendMessageResult
+            {
+                Task = new A2ATask
+                {
+                    Id = "task-001",
+                    ContextId = "ctx-1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Submitted }
+                }
+            };
+
+            string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "test-req",
+                Result = JsonSerializer.SerializeToElement(resultWrapper, s_jsonOptions)
+            }, s_jsonOptions);
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                A2ASendMessageResult result = await client.SendMessageAsync(
+                    A2AMessage.CreateUserTextMessage("start task"));
+
+                Assert.NotNull(result);
+                Assert.NotNull(result.Task);
+                Assert.Null(result.Message);
+                Assert.Equal("task-001", result.Task.Id);
+                Assert.Equal(A2ATaskState.Submitted, result.Task.Status.State);
             }
         }
 
@@ -152,11 +197,14 @@ namespace A2A.Tests
             var handler = new MockHttpHandler(req =>
             {
                 capturedBody = req.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                var resultMsg = A2AMessage.CreateUserTextMessage("ok");
+                var resultWrapper = new A2ASendMessageResult
+                {
+                    Message = A2AMessage.CreateUserTextMessage("ok")
+                };
                 string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
                 {
                     Id = "test",
-                    Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
+                    Result = JsonSerializer.SerializeToElement(resultWrapper, s_jsonOptions)
                 }, s_jsonOptions);
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {
@@ -197,11 +245,14 @@ namespace A2A.Tests
                 capturedAuth = req.Headers.Contains("Authorization")
                     ? string.Join(",", req.Headers.GetValues("Authorization"))
                     : null;
-                var resultMsg = A2AMessage.CreateUserTextMessage("ok");
+                var resultWrapper = new A2ASendMessageResult
+                {
+                    Message = A2AMessage.CreateUserTextMessage("ok")
+                };
                 string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
                 {
                     Id = "test",
-                    Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
+                    Result = JsonSerializer.SerializeToElement(resultWrapper, s_jsonOptions)
                 }, s_jsonOptions);
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {
@@ -225,27 +276,40 @@ namespace A2A.Tests
         // ───────────────────── Streaming ─────────────────────
 
         [Fact]
-        public async Task SendMessageStreamingAsync_ReceivesChunks()
+        public async Task SendMessageStreamingAsync_ReceivesStreamResponses()
         {
-            string chunk1Json = JsonSerializer.Serialize(new JsonRpcResponse
+            // v1.0: SSE events contain StreamResponse wrapper in JSON-RPC result
+            var chunk1 = new A2AStreamResponse
             {
-                Id = "stream-req",
-                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                Message = new A2AMessage
                 {
                     MessageId = "r1", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText("Hello") }
-                }, s_jsonOptions)
-            }, s_jsonOptions);
+                }
+            };
 
-            string chunk2Json = JsonSerializer.Serialize(new JsonRpcResponse
+            var chunk2 = new A2AStreamResponse
             {
-                Id = "stream-req",
-                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                Message = new A2AMessage
                 {
-                    MessageId = "r1", Role = "ROLE_AGENT",
+                    MessageId = "r2", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText(" World") }
-                }, s_jsonOptions)
-            }, s_jsonOptions);
+                }
+            };
+
+            var complete = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1",
+                    ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+                }
+            };
+
+            string chunk1Json = ToJsonRpcResult(chunk1, "stream-req");
+            string chunk2Json = ToJsonRpcResult(chunk2, "stream-req");
+            string completeJson = ToJsonRpcResult(complete, "stream-req");
 
             string ssePayload =
                 "event: message\n" +
@@ -255,46 +319,8 @@ namespace A2A.Tests
                 "data: " + chunk2Json + "\n" +
                 "\n" +
                 "event: complete\n" +
-                "data: {\"taskId\":\"t1\",\"status\":\"completed\"}\n" +
+                "data: " + completeJson + "\n" +
                 "\n";
-
-            var handler = new MockHttpHandler(req =>
-            {
-                var response = new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new StringContent(ssePayload, Encoding.UTF8, "text/event-stream")
-                };
-                return response;
-            });
-
-            using (var client = new A2AClient(s_testEndpoint, handler))
-            {
-                var chunks = new List<string>();
-
-                List<A2AMessage> messages = await client.SendMessageStreamingAsync(
-                    A2AMessage.CreateUserTextMessage("stream test"),
-                    onMessageChunk: chunk =>
-                    {
-                        if (chunk.Parts != null)
-                        {
-                            foreach (var part in chunk.Parts)
-                            {
-                                if (part.Kind == PartKind.Text) chunks.Add(part.Text);
-                            }
-                        }
-                    });
-
-                Assert.Equal(2, messages.Count);
-                Assert.Equal("Hello", messages[0].Parts[0].Text);
-                Assert.Equal(" World", messages[1].Parts[0].Text);
-                Assert.Equal(new[] { "Hello", " World" }, chunks.ToArray());
-            }
-        }
-
-        [Fact]
-        public async Task SendMessageStreamingAsync_EmptyStream_ReturnsEmptyList()
-        {
-            string ssePayload = "event: complete\ndata: {\"status\":\"completed\"}\n\n";
 
             var handler = new MockHttpHandler(req =>
                 new HttpResponseMessage(HttpStatusCode.OK)
@@ -304,30 +330,87 @@ namespace A2A.Tests
 
             using (var client = new A2AClient(s_testEndpoint, handler))
             {
-                List<A2AMessage> messages = await client.SendMessageStreamingAsync(
+                var textChunks = new List<string>();
+
+                List<A2AStreamResponse> events = await client.SendMessageStreamingAsync(
+                    A2AMessage.CreateUserTextMessage("stream test"),
+                    onStreamEvent: evt =>
+                    {
+                        if (evt.Message?.Parts != null)
+                        {
+                            foreach (var part in evt.Message.Parts)
+                            {
+                                if (part.Kind == PartKind.Text) textChunks.Add(part.Text);
+                            }
+                        }
+                    });
+
+                Assert.Equal(3, events.Count);
+                Assert.NotNull(events[0].Message);
+                Assert.Equal("Hello", events[0].Message.Parts[0].Text);
+                Assert.NotNull(events[1].Message);
+                Assert.Equal(" World", events[1].Message.Parts[0].Text);
+                Assert.NotNull(events[2].StatusUpdate);
+                Assert.Equal(A2ATaskState.Completed, events[2].StatusUpdate.Status.State);
+                Assert.Equal(new[] { "Hello", " World" }, textChunks.ToArray());
+            }
+        }
+
+        [Fact]
+        public async Task SendMessageStreamingAsync_EmptyStream_ReturnsEmptyList()
+        {
+            // Only a terminal status event, no message events
+            var complete = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1", ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+                }
+            };
+            string ssePayload = "event: complete\ndata: " + ToJsonRpcResult(complete, "req") + "\n\n";
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(ssePayload, Encoding.UTF8, "text/event-stream")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                List<A2AStreamResponse> events = await client.SendMessageStreamingAsync(
                     A2AMessage.CreateUserTextMessage("test"));
 
-                Assert.Empty(messages);
+                Assert.Single(events);
+                Assert.NotNull(events[0].StatusUpdate);
             }
         }
 
         [Fact]
         public async Task SendMessageStreamingAsync_MultiLineData_JoinsWithNewline()
         {
-            var resultMsg = new A2AMessage
+            var msg = new A2AStreamResponse
             {
-                MessageId = "r1", Role = "ROLE_AGENT",
-                Parts = new List<A2APart> { A2APart.FromText("hello world") }
+                Message = new A2AMessage
+                {
+                    MessageId = "r1", Role = "ROLE_AGENT",
+                    Parts = new List<A2APart> { A2APart.FromText("hello world") }
+                }
             };
-            string rpcJson = JsonSerializer.Serialize(new JsonRpcResponse
-            {
-                Id = "ml-req",
-                Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
-            }, s_jsonOptions);
+            string rpcJson = ToJsonRpcResult(msg, "ml-req");
 
             int splitPoint = rpcJson.IndexOf("\"id\"");
             string part1 = rpcJson.Substring(0, splitPoint);
             string part2 = rpcJson.Substring(splitPoint);
+
+            var complete = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1", ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+                }
+            };
 
             string ssePayload =
                 "event: message\n" +
@@ -335,7 +418,7 @@ namespace A2A.Tests
                 "data: " + part2 + "\n" +
                 "\n" +
                 "event: complete\n" +
-                "data: {\"status\":\"completed\"}\n" +
+                "data: " + ToJsonRpcResult(complete, "ml-req") + "\n" +
                 "\n";
 
             var handler = new MockHttpHandler(req =>
@@ -346,11 +429,11 @@ namespace A2A.Tests
 
             using (var client = new A2AClient(s_testEndpoint, handler))
             {
-                List<A2AMessage> messages = await client.SendMessageStreamingAsync(
+                List<A2AStreamResponse> events = await client.SendMessageStreamingAsync(
                     A2AMessage.CreateUserTextMessage("multi-line test"));
 
-                Assert.Single(messages);
-                Assert.Equal("hello world", messages[0].Parts[0].Text);
+                Assert.Equal(2, events.Count);
+                Assert.Equal("hello world", events[0].Message.Parts[0].Text);
             }
         }
 
@@ -376,35 +459,42 @@ namespace A2A.Tests
         {
             int callCount = 0;
 
-            string chunk1Json = JsonSerializer.Serialize(new JsonRpcResponse
+            var chunk1 = new A2AStreamResponse
             {
-                Id = "reconnect",
-                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                Message = new A2AMessage
                 {
                     MessageId = "r1", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText("chunk1") }
-                }, s_jsonOptions)
-            }, s_jsonOptions);
+                }
+            };
 
-            string chunk2Json = JsonSerializer.Serialize(new JsonRpcResponse
+            var chunk2 = new A2AStreamResponse
             {
-                Id = "reconnect",
-                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                Message = new A2AMessage
                 {
                     MessageId = "r2", Role = "ROLE_AGENT",
                     Parts = new List<A2APart> { A2APart.FromText("chunk2") }
-                }, s_jsonOptions)
-            }, s_jsonOptions);
+                }
+            };
+
+            var complete = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1", ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+                }
+            };
 
             string completeSse =
                 "event: message\n" +
-                "data: " + chunk1Json + "\n" +
+                "data: " + ToJsonRpcResult(chunk1, "reconnect") + "\n" +
                 "\n" +
                 "event: message\n" +
-                "data: " + chunk2Json + "\n" +
+                "data: " + ToJsonRpcResult(chunk2, "reconnect") + "\n" +
                 "\n" +
                 "event: complete\n" +
-                "data: {\"status\":\"completed\"}\n" +
+                "data: " + ToJsonRpcResult(complete, "reconnect") + "\n" +
                 "\n";
 
             var handler = new MockHttpHandler(req =>
@@ -422,12 +512,13 @@ namespace A2A.Tests
 
             using (var client = new A2AClient(s_testEndpoint, handler))
             {
-                List<A2AMessage> messages = await client.SendMessageStreamingAsync(
+                List<A2AStreamResponse> events = await client.SendMessageStreamingAsync(
                     A2AMessage.CreateUserTextMessage("reconnect test"));
 
-                Assert.Equal(2, messages.Count);
-                Assert.Equal("chunk1", messages[0].Parts[0].Text);
-                Assert.Equal("chunk2", messages[1].Parts[0].Text);
+                Assert.Equal(3, events.Count);
+                Assert.Equal("chunk1", events[0].Message.Parts[0].Text);
+                Assert.Equal("chunk2", events[1].Message.Parts[0].Text);
+                Assert.NotNull(events[2].StatusUpdate);
                 Assert.True(callCount >= 2, "Client should have reconnected at least once");
             }
         }
@@ -453,6 +544,16 @@ namespace A2A.Tests
         }
 
         // ───────────────────── Helpers ─────────────────────
+
+        private static string ToJsonRpcResult(object obj, string id)
+        {
+            var rpc = new JsonRpcResponse
+            {
+                Id = id,
+                Result = JsonSerializer.SerializeToElement(obj, s_jsonOptions)
+            };
+            return JsonSerializer.Serialize(rpc, s_jsonOptions);
+        }
 
         private class MockHttpHandler : HttpMessageHandler
         {

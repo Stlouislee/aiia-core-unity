@@ -285,8 +285,12 @@ namespace LiveLink.Agent.A2A
             {
                 string agentResponse = await _handleMessageAsync(userText, ct);
 
-                var resultMessage = A2AMessage.CreateAgentTextMessage(agentResponse);
-                string resultJson = JsonSerializer.Serialize(resultMessage, s_jsonOptions);
+                // Wrap response in SendMessageResponse (v1.0): oneof task or message
+                var result = new A2ASendMessageResult
+                {
+                    Message = A2AMessage.CreateAgentTextMessage(agentResponse)
+                };
+                string resultJson = JsonSerializer.Serialize(result, s_jsonOptions);
 
                 await WriteJsonRpcSuccessResponseAsync(stream, rpcRequest.Id, resultJson);
             }
@@ -360,25 +364,44 @@ namespace LiveLink.Agent.A2A
             {
                 string agentResponse = await _handleMessageAsync(userText, ct);
 
-                var sseMessage = new A2AMessage
+                // Send message as StreamResponse (v1.0)
+                var streamResponse = new A2AStreamResponse
                 {
-                    Role = "ROLE_AGENT",
-                    Parts = new List<A2APart> { A2APart.FromText(agentResponse) }
+                    Message = new A2AMessage
+                    {
+                        Role = "ROLE_AGENT",
+                        Parts = new List<A2APart> { A2APart.FromText(agentResponse) }
+                    }
                 };
 
-                // Wrap in JSON-RPC 2.0 response for SSE
                 var rpcResult = new JsonRpcResponse
                 {
                     Id = requestId,
-                    Result = JsonSerializer.SerializeToElement(sseMessage, s_jsonOptions)
+                    Result = JsonSerializer.SerializeToElement(streamResponse, s_jsonOptions)
                 };
                 string eventJson = JsonSerializer.Serialize(rpcResult, s_jsonOptions);
-
                 await WriteSseEventAsync(stream, "message", eventJson);
 
-                // Send complete event
-                var completeEvent = new A2AStreamingEvent { Status = "completed" };
-                string completeJson = JsonSerializer.Serialize(completeEvent, s_jsonOptions);
+                // Send terminal status update as StreamResponse (v1.0)
+                var completeResponse = new A2AStreamResponse
+                {
+                    StatusUpdate = new A2ATaskStatusUpdateEvent
+                    {
+                        ContextId = "ctx-" + requestId,
+                        Status = new A2ATaskStatus
+                        {
+                            State = A2ATaskState.Completed,
+                            Timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                        }
+                    }
+                };
+
+                var completeRpc = new JsonRpcResponse
+                {
+                    Id = requestId,
+                    Result = JsonSerializer.SerializeToElement(completeResponse, s_jsonOptions)
+                };
+                string completeJson = JsonSerializer.Serialize(completeRpc, s_jsonOptions);
                 await WriteSseEventAsync(stream, "complete", completeJson);
             }
             catch (OperationCanceledException)

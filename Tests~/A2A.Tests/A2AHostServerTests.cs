@@ -185,9 +185,13 @@ namespace A2A.Tests
                     Assert.Null(result.Error);
                     Assert.True(result.Result.HasValue);
 
-                    A2AMessage msg = result.Result.Value.Deserialize<A2AMessage>(s_jsonOptions);
-                    Assert.Equal("ROLE_AGENT", msg.Role);
-                    Assert.Equal("You said: Hello agent!", msg.Parts[0].Text);
+                    // v1.0: result is a SendMessageResult wrapper
+                    A2ASendMessageResult sendResult = result.Result.Value
+                        .Deserialize<A2ASendMessageResult>(s_jsonOptions);
+                    Assert.NotNull(sendResult.Message);
+                    Assert.Null(sendResult.Task);
+                    Assert.Equal("ROLE_AGENT", sendResult.Message.Role);
+                    Assert.Equal("You said: Hello agent!", sendResult.Message.Parts[0].Text);
                 }
             }
             finally
@@ -340,6 +344,9 @@ namespace A2A.Tests
                     Assert.Contains("streaming response", body);
                     Assert.Contains("event: complete", body);
                     Assert.Contains("\"jsonrpc\":\"2.0\"", body);
+                    // v1.0: SSE data contains StreamResponse wrapper
+                    Assert.Contains("\"statusUpdate\"", body);
+                    Assert.Contains("\"TASK_STATE_COMPLETED\"", body);
                 }
             }
             finally

@@ -332,6 +332,65 @@ namespace A2A.Tests
             Assert.Equal("Done!", resp.Message.Parts[0].Text);
         }
 
+        // ───────────────────── SendMessageResult (v1.0 wrapper) ─────────────────────
+
+        [Fact]
+        public void SendMessageResult_WithMessage_RoundTrip()
+        {
+            var result = new A2ASendMessageResult
+            {
+                Message = A2AMessage.CreateAgentTextMessage("Done!")
+            };
+
+            string json = JsonSerializer.Serialize(result, s_options);
+            A2ASendMessageResult deserialized = JsonSerializer
+                .Deserialize<A2ASendMessageResult>(json, s_options);
+
+            Assert.NotNull(deserialized.Message);
+            Assert.Null(deserialized.Task);
+            Assert.Equal("Done!", deserialized.Message.Parts[0].Text);
+        }
+
+        [Fact]
+        public void SendMessageResult_WithTask_RoundTrip()
+        {
+            var result = new A2ASendMessageResult
+            {
+                Task = new A2ATask
+                {
+                    Id = "t1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Submitted }
+                }
+            };
+
+            string json = JsonSerializer.Serialize(result, s_options);
+            A2ASendMessageResult deserialized = JsonSerializer
+                .Deserialize<A2ASendMessageResult>(json, s_options);
+
+            Assert.NotNull(deserialized.Task);
+            Assert.Null(deserialized.Message);
+            Assert.Equal("t1", deserialized.Task.Id);
+        }
+
+        [Fact]
+        public void SendMessageResult_HasCorrectWireFormat()
+        {
+            var result = new A2ASendMessageResult
+            {
+                Message = A2AMessage.CreateAgentTextMessage("hi")
+            };
+
+            string json = JsonSerializer.Serialize(result, s_options);
+
+            // Top-level keys should be "message" (or "task"), not raw message fields
+            Assert.Contains("\"message\"", json);
+
+            // Verify structure: the message field contains the A2AMessage
+            var deserialized = JsonSerializer.Deserialize<A2ASendMessageResult>(json, s_options);
+            Assert.NotNull(deserialized.Message);
+            Assert.Equal("hi", deserialized.Message.Parts[0].Text);
+        }
+
         // ───────────────────── JSON-RPC 2.0 Envelope ─────────────────────
 
         [Fact]
