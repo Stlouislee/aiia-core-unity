@@ -1,7 +1,7 @@
 # Embedded Agent Runtime — Technical Documentation
 
 > **Package:** aiia-core-unity (LiveLink)  
-> **Last updated:** 2026-05-03  
+> **Last updated:** 2026-05-05  
 > **Audience:** Unity developers integrating AI agents into their applications
 
 ---
@@ -14,9 +14,10 @@
 4. [Downstream MCP Server Configuration](#4-downstream-mcp-server-configuration)
 5. [Persistent Chat History System](#5-persistent-chat-history-system)
 6. [UI Events Reference](#6-ui-events-reference)
-7. [Security Considerations](#7-security-considerations)
-8. [Design Issues Found in the Codebase](#8-design-issues-found-in-the-codebase)
-9. [Refactoring Suggestions](#9-refactoring-suggestions)
+7. [A2A (Agent-to-Agent) Protocol](#7-a2a-agent-to-agent-protocol)
+8. [Security Considerations](#8-security-considerations)
+9. [Design Issues Found in the Codebase](#9-design-issues-found-in-the-codebase)
+10. [Refactoring Suggestions](#10-refactoring-suggestions)
 
 ---
 
@@ -517,7 +518,109 @@ public class AgentUI : MonoBehaviour
 
 ---
 
-## 7. Security Considerations
+## 7. A2A (Agent-to-Agent) Protocol
+
+### Overview
+
+LiveLink implements the [A2A v1.0 protocol](https://a2a-protocol.org) — an open standard for agent-to-agent communication backed by Google, Microsoft, AWS, IBM, and SAP under the Linux Foundation. A2A complements MCP (tool integration) by handling agent-to-agent delegation and discovery.
+
+The implementation has two sides:
+
+| Component | Purpose |
+|-----------|---------|
+| **A2A Client** | Discover and delegate tasks to remote A2A agents |
+| **A2A Host Server** | Expose the Unity agent as a discoverable A2A endpoint |
+
+### 7.1 A2A Client — Remote Agent Delegation
+
+#### Configuration
+
+Add remote agents in `AgentRuntimeConfig > Remote A2A Agents`:
+
+| Field | Description |
+|-------|-------------|
+| `Enabled` | Toggle this agent on/off |
+| `Display Name` | Human-readable name (becomes tool name: `ask_{name}`) |
+| `Endpoint` | Remote agent URL (e.g., `https://openclaw-host`) |
+| `Use Agent Card Discovery` | Fetch `/.well-known/agent-card.json` on connect |
+| `Connection Timeout` | HTTP timeout in seconds |
+| `Headers` | Custom headers (e.g., `Authorization: Bearer ...`) |
+| `Enable Streaming` | Use SSE streaming when the remote agent supports it |
+| `Delegate Tool Prefix` | Custom tool name prefix (default: `ask_`) |
+| `Accept Self-Signed Certs` | Trust untrusted SSL certificates |
+
+#### How It Works
+
+1. On `InitializeAsync`, the runtime fetches each remote agent's card from `/.well-known/agent-card.json`
+2. The agent card describes capabilities, skills, and endpoints
+3. Each remote agent is wrapped as an `AIFunction` tool (e.g., `ask_openclaw`)
+4. The embedded agent can invoke these tools to delegate questions/tasks
+5. Remote agent skills are included in the system prompt
+
+#### SSE Streaming & Reconnection
+
+When streaming is enabled and the remote agent supports it, responses arrive as SSE events. The client automatically reconnects on connection drops with exponential backoff (1s → 2s → 4s, max 3 attempts). This handles:
+
+- Android Doze mode / WiFi sleep
+- Meta Quest headset standby
+- Network switching
+
+#### Platform Notes
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Unity Editor | ✅ Full support | Debug logging enabled |
+| Android (IL2CPP) | ✅ Supported | Thread-safe logging, `link.xml` protection |
+| Meta Quest | ✅ Supported | SSE reconnection handles WiFi/Doze |
+| iOS | ✅ Supported | No special configuration needed |
+| WebGL | ⚠️ Limited | SSE streaming may not work due to browser restrictions |
+
+### 7.2 A2A Host Server — Expose Unity Agent
+
+#### Configuration
+
+Configure in `AgentRuntimeConfig > A2A Hosting`:
+
+| Field | Description |
+|-------|-------------|
+| `Enabled` | Start the A2A host server |
+| `Port` | Listen port (default: 8082, MCP uses 8081) |
+| `Agent Name` | Name shown in agent card |
+| `Agent Description` | Description shown in agent card |
+| `Agent Version` | Version string |
+| `Enable Streaming` | Support SSE streaming responses |
+| `Auth Token` | Optional Bearer token for incoming requests |
+| `Rate Limit Per Minute` | Per-IP rate limit (0 = unlimited) |
+| `Skills` | List of skills exposed in agent card |
+
+#### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/.well-known/agent-card.json` | Agent discovery (A2A spec) |
+| `POST` | `/a2a` | Send message, receive agent response |
+| `GET` | `/health` | Health check |
+| `OPTIONS` | `*` | CORS preflight |
+
+#### Security
+
+- **Bearer Auth**: Set `Auth Token` in config. Incoming requests must include `Authorization: Bearer <token>`.
+- **Rate Limiting**: Per-IP sliding window (1 minute). Exceeding returns 429.
+- **CORS**: `Access-Control-Allow-Origin: *` on all responses.
+
+### 7.3 Testing
+
+Run A2A tests with:
+
+```bash
+dotnet test Tests~/A2A.Tests/A2A.Tests.csproj
+```
+
+Tests cover: protocol types (serialization round-trip), client HTTP behavior (mock), SSE streaming (single + multi-line data), tool wrapper (name sanitization, invocation), host server (routing, auth, streaming), agent card builder, and resilience patterns (retry, reconnection).
+
+---
+
+## 8. Security Considerations
 
 ### API Key Management
 
@@ -567,7 +670,7 @@ The `Allow Scene Mutation Tools` flag on `AgentRuntimeConfig` controls whether w
 
 ---
 
-## 8. Design Issues Found in the Codebase
+## 9. Design Issues Found in the Codebase
 
 ### 8.1 Fire-and-Forget Initialization from `Start()`
 
@@ -681,7 +784,7 @@ The `WrapToolForEvent` method wraps every tool in a `ToolCallNotifyingFunction` 
 
 ---
 
-## 9. Refactoring Suggestions
+## 10. Refactoring Suggestions
 
 ### 9.1 Add Retry Logic for Initialization
 

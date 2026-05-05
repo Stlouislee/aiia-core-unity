@@ -11,6 +11,7 @@ LiveLink is a dedicated Unity package designed to bring advanced, extensible AI 
 - 🔧 **Prefab Spawning**: Spawn registered prefabs from external commands
 - 🖥️ **Custom Editor**: Easy-to-use inspector with status display and controls
 - 🤝 **MCP Support**: JSON-RPC endpoint exposing scene resources and Unity tools
+- 🤖 **A2A Protocol**: Agent-to-Agent communication via [A2A v1.0](https://a2a-protocol.org) — delegate tasks to remote agents and expose your Unity agent as a discoverable A2A endpoint
 
 ## Understanding LiveLink in Unity App
 
@@ -108,6 +109,48 @@ The package now includes an embedded Microsoft Agent Framework runtime for singl
 - LiveLink MCP remains the default first-party server for the embedded agent.
 - Downstream MCP servers are configured for the agent only and are not bridged back through LiveLink MCP.
 - Stdio-based downstream MCP servers are intended for the Unity Editor and standalone desktop players.
+
+## A2A (Agent-to-Agent) Protocol
+
+LiveLink supports the [A2A v1.0 protocol](https://a2a-protocol.org) for agent-to-agent communication, backed by Google, Microsoft, AWS, IBM, and SAP under the Linux Foundation.
+
+### A2A Client — Delegate to Remote Agents
+
+Configure remote A2A agents in the `AgentRuntimeConfig` Inspector to let your embedded agent delegate tasks to external peers (OpenClaw, Hermes, etc.):
+
+```
+Remote A2A Agents:
+  - Display Name: OpenClaw
+    Endpoint: https://your-openclaw-host
+    Use Agent Card Discovery: true
+    Headers:
+      - Name: Authorization
+        Value: Bearer <token>
+```
+
+Each remote agent is wrapped as a callable tool (e.g., `ask_openclaw`) available to the embedded agent.
+
+### A2A Host — Expose Your Unity Agent
+
+Enable A2A hosting in `AgentRuntimeConfig` to make your Unity agent discoverable by external A2A clients:
+
+```
+A2A Hosting:
+  Enabled: true
+  Port: 8082
+  Agent Name: My Unity Agent
+  Auth Token: <optional bearer token>
+```
+
+External clients can then:
+1. Discover your agent via `GET /.well-known/agent-card.json`
+2. Send messages via `POST /a2a`
+3. Health-check via `GET /health`
+
+### Platform Notes
+
+- **Android / Meta Quest**: IL2CPP-compatible. Uses thread-safe logging, `link.xml` for stripping protection, and automatic SSE reconnection for WiFi/Doze resilience.
+- **Self-signed certificates**: Enable `AcceptSelfSignedCertificates` per remote agent config for local dev or enterprise CAs.
 
 ## Dynamic Tool Bridge (Annotation Based)
 
