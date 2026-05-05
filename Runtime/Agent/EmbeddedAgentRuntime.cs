@@ -76,6 +76,7 @@ namespace LiveLink.Agent
 
         private AIAgent _agent;
         private AgentSession _session;
+        private A2AHostServer _a2aHostServer;
         private bool _isInitialized;
         private bool _isBusy;
         private string _status = "Idle";
@@ -280,6 +281,23 @@ namespace LiveLink.Agent
                         .ConfigureAwait(false);
                 }
 
+                // Start A2A host server if configured.
+                if (_config.A2AHostConfig != null && _config.A2AHostConfig.Enabled)
+                {
+                    try
+                    {
+                        SetStatus("Starting A2A host server...");
+                        _a2aHostServer = new A2AHostServer(
+                            _config.A2AHostConfig,
+                            (userMessage, ct) => SendMessageAsync(userMessage, ct));
+                        _a2aHostServer.Start();
+                    }
+                    catch (Exception ex)
+                    {
+                        warnings.Add(string.Format("Failed to start A2A host server: {0}", ex.Message));
+                    }
+                }
+
                 _isInitialized = true;
                 SetStatus(string.Format("Ready. Connected {0} MCP server(s), {1} A2A agent(s).",
                     _connectedServers.Count, _connectedA2AAgents.Count));
@@ -375,6 +393,14 @@ namespace LiveLink.Agent
             _agent = null;
             _session = null;
             _availableToolNames.Clear();
+
+            // Stop A2A host server.
+            if (_a2aHostServer != null)
+            {
+                try { _a2aHostServer.Dispose(); } catch { }
+                _a2aHostServer = null;
+            }
+
             await DisposeConnectionsAsync().ConfigureAwait(false);
             SetStatus("Stopped.");
         }

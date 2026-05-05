@@ -75,6 +75,11 @@ namespace LiveLink.Agent
         [SerializeField]
         private List<AgentA2ARemoteConfig> _remoteA2AAgents = new List<AgentA2ARemoteConfig>();
 
+        [Header("A2A Hosting")]
+        [Tooltip("Configuration for hosting this agent as an A2A endpoint.")]
+        [SerializeField]
+        private A2AHostConfig _a2aHostConfig = new A2AHostConfig();
+
         public string AgentName => _agentName;
         public string OpenAIModel => _openAIModel;
         public bool PreferEnvironmentApiKey => _preferEnvironmentApiKey;
@@ -93,6 +98,7 @@ namespace LiveLink.Agent
         public int MaxHistoryFileSizeBytes => _maxHistoryFileSizeBytes;
         public IReadOnlyList<AgentExternalMcpServerConfig> ExternalMcpServers => _externalMcpServers;
         public IReadOnlyList<AgentA2ARemoteConfig> RemoteA2AAgents => _remoteA2AAgents;
+        public A2AHostConfig A2AHostConfig => _a2aHostConfig;
 
         public string ResolveOpenAIApiKey()
         {

@@ -96,6 +96,15 @@ namespace LiveLink.Agent.A2A
                 Parts = new List<A2APart> { A2APart.FromText(text) }
             };
         }
+
+        public static A2AMessage CreateAgentTextMessage(string text)
+        {
+            return new A2AMessage
+            {
+                Role = "agent",
+                Parts = new List<A2APart> { A2APart.FromText(text) }
+            };
+        }
     }
 
     public class A2APart
