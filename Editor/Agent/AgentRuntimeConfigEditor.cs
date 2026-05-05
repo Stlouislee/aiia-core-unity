@@ -289,7 +289,19 @@ namespace LiveLink.Agent.Editor
             try
             {
                 EditorUtility.DisplayProgressBar("Testing MCP Connection", "Connecting to configured server...", 0.5f);
-                result = AgentMcpConnectionTester.TestConnectionAsync(server, CancellationToken.None).GetAwaiter().GetResult();
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                {
+                    result = AgentMcpConnectionTester.TestConnectionAsync(server, cts.Token).GetAwaiter().GetResult();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                result = new AgentMcpConnectionTestResult
+                {
+                    Success = false,
+                    DisplayName = server.DisplayName ?? "MCP Server",
+                    ErrorMessage = "Connection timed out after 30 seconds."
+                };
             }
             finally
             {
@@ -336,7 +348,19 @@ namespace LiveLink.Agent.Editor
             try
             {
                 EditorUtility.DisplayProgressBar("Testing LLM", string.Format("Sending test request to {0}...", config.Model), 0.5f);
-                result = AgentLlmTester.TestConnectionAsync(config, CancellationToken.None).GetAwaiter().GetResult();
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                {
+                    result = AgentLlmTester.TestConnectionAsync(config, cts.Token).GetAwaiter().GetResult();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                result = new AgentLlmTestResult
+                {
+                    Success = false,
+                    Model = config.Model,
+                    ErrorMessage = "Request timed out after 30 seconds."
+                };
             }
             finally
             {
