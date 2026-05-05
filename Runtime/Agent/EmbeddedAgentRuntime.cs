@@ -1074,12 +1074,19 @@ namespace LiveLink.Agent
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
         {
             string userMessage;
+            string parseError = null;
             try
             {
                 var parsed = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(messageJson);
                 userMessage = parsed.GetProperty("message").GetString();
             }
-            catch
+            catch (Exception ex)
+            {
+                parseError = ex.Message;
+                userMessage = null;
+            }
+
+            if (parseError != null)
             {
                 yield return System.Text.Json.JsonSerializer.Serialize(new { error = "Invalid request. Expected JSON with 'message' field." });
                 yield break;
