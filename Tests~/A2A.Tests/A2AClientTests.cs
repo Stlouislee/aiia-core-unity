@@ -72,14 +72,17 @@ namespace A2A.Tests
         [Fact]
         public async Task SendMessageAsync_ReturnsResponse()
         {
-            string responseJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+            var resultMessage = new A2AMessage
             {
-                Message = new A2AMessage
-                {
-                    MessageId = "resp-1",
-                    Role = "agent",
-                    Parts = new List<A2APart> { A2APart.FromText("Hello from agent!") }
-                }
+                MessageId = "resp-1",
+                Role = "agent",
+                Parts = new List<A2APart> { A2APart.FromText("Hello from agent!") }
+            };
+
+            string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "test-req",
+                Result = JsonSerializer.SerializeToElement(resultMessage, s_jsonOptions)
             }, s_jsonOptions);
 
             var handler = new MockHttpHandler(req =>
@@ -106,9 +109,10 @@ namespace A2A.Tests
         [Fact]
         public async Task SendMessageAsync_ErrorResponse_Throws()
         {
-            string errorJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+            string errorJson = JsonSerializer.Serialize(new JsonRpcResponse
             {
-                Error = new A2AError { Code = -32600, Message = "Invalid Request" }
+                Id = "test-req",
+                Error = new JsonRpcError { Code = -32600, Message = "Invalid Request" }
             }, s_jsonOptions);
 
             var handler = new MockHttpHandler(req =>
@@ -148,9 +152,11 @@ namespace A2A.Tests
             var handler = new MockHttpHandler(req =>
             {
                 capturedBody = req.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                string responseJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+                var resultMsg = A2AMessage.CreateUserTextMessage("ok");
+                string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
                 {
-                    Message = A2AMessage.CreateUserTextMessage("ok")
+                    Id = "test",
+                    Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
                 }, s_jsonOptions);
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {
@@ -166,8 +172,13 @@ namespace A2A.Tests
             Assert.NotNull(capturedBody);
             using (JsonDocument doc = JsonDocument.Parse(capturedBody))
             {
-                Assert.False(doc.RootElement.GetProperty("streaming").GetBoolean());
+                // Must be JSON-RPC 2.0 format
+                Assert.Equal("2.0", doc.RootElement.GetProperty("jsonrpc").GetString());
+                Assert.Equal("message/send", doc.RootElement.GetProperty("method").GetString());
+                Assert.True(doc.RootElement.TryGetProperty("id", out _));
+
                 string text = doc.RootElement
+                    .GetProperty("params")
                     .GetProperty("message")
                     .GetProperty("parts")[0]
                     .GetProperty("text")
@@ -186,9 +197,11 @@ namespace A2A.Tests
                 capturedAuth = req.Headers.Contains("Authorization")
                     ? string.Join(",", req.Headers.GetValues("Authorization"))
                     : null;
-                string responseJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+                var resultMsg = A2AMessage.CreateUserTextMessage("ok");
+                string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
                 {
-                    Message = A2AMessage.CreateUserTextMessage("ok")
+                    Id = "test",
+                    Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
                 }, s_jsonOptions);
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {
@@ -214,12 +227,33 @@ namespace A2A.Tests
         [Fact]
         public async Task SendMessageStreamingAsync_ReceivesChunks()
         {
+            // SSE events now contain JSON-RPC 2.0 responses
+            string chunk1Json = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "stream-req",
+                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                {
+                    MessageId = "r1", Role = "agent",
+                    Parts = new List<A2APart> { A2APart.FromText("Hello") }
+                }, s_jsonOptions)
+            }, s_jsonOptions);
+
+            string chunk2Json = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "stream-req",
+                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                {
+                    MessageId = "r1", Role = "agent",
+                    Parts = new List<A2APart> { A2APart.FromText(" World") }
+                }, s_jsonOptions)
+            }, s_jsonOptions);
+
             string ssePayload =
                 "event: message\n" +
-                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\"Hello\"}]}}\n" +
+                "data: " + chunk1Json + "\n" +
                 "\n" +
                 "event: message\n" +
-                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\" World\"}]}}\n" +
+                "data: " + chunk2Json + "\n" +
                 "\n" +
                 "event: complete\n" +
                 "data: {\"taskId\":\"t1\",\"status\":\"completed\"}\n" +
@@ -282,11 +316,27 @@ namespace A2A.Tests
         public async Task SendMessageStreamingAsync_MultiLineData_JoinsWithNewline()
         {
             // SSE spec: multiple "data:" lines in one event should be joined with \n.
-            // The joined result must be valid JSON.
+            // The joined result must be valid JSON-RPC 2.0 response.
+            var resultMsg = new A2AMessage
+            {
+                MessageId = "r1", Role = "agent",
+                Parts = new List<A2APart> { A2APart.FromText("hello world") }
+            };
+            string rpcJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "ml-req",
+                Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
+            }, s_jsonOptions);
+
+            // Split the JSON at a natural boundary (after "2.0",)
+            int splitPoint = rpcJson.IndexOf("\"id\"");
+            string part1 = rpcJson.Substring(0, splitPoint);
+            string part2 = rpcJson.Substring(splitPoint);
+
             string ssePayload =
                 "event: message\n" +
-                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\"\n" +
-                "data: ,\"text\":\"hello world\"}]}}\n" +
+                "data: " + part1 + "\n" +
+                "data: " + part2 + "\n" +
                 "\n" +
                 "event: complete\n" +
                 "data: {\"status\":\"completed\"}\n" +
@@ -330,12 +380,33 @@ namespace A2A.Tests
         {
             // Simulate: first request fails with 503, second request completes normally.
             int callCount = 0;
+
+            string chunk1Json = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "reconnect",
+                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                {
+                    MessageId = "r1", Role = "agent",
+                    Parts = new List<A2APart> { A2APart.FromText("chunk1") }
+                }, s_jsonOptions)
+            }, s_jsonOptions);
+
+            string chunk2Json = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "reconnect",
+                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                {
+                    MessageId = "r2", Role = "agent",
+                    Parts = new List<A2APart> { A2APart.FromText("chunk2") }
+                }, s_jsonOptions)
+            }, s_jsonOptions);
+
             string completeSse =
                 "event: message\n" +
-                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\"chunk1\"}]}}\n" +
+                "data: " + chunk1Json + "\n" +
                 "\n" +
                 "event: message\n" +
-                "data: {\"message\":{\"messageId\":\"r2\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\"chunk2\"}]}}\n" +
+                "data: " + chunk2Json + "\n" +
                 "\n" +
                 "event: complete\n" +
                 "data: {\"status\":\"completed\"}\n" +

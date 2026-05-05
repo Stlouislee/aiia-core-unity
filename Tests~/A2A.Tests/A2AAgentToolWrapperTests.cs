@@ -125,13 +125,15 @@ namespace A2A.Tests
         [Fact]
         public async Task InvokeAsync_ReturnsAgentResponse()
         {
-            string responseJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+            var resultMsg = new A2AMessage
             {
-                Message = new A2AMessage
-                {
-                    Role = "agent",
-                    Parts = new List<A2APart> { A2APart.FromText("42") }
-                }
+                Role = "agent",
+                Parts = new List<A2APart> { A2APart.FromText("42") }
+            };
+            string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "test",
+                Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
             }, s_jsonOptions);
 
             var handler = new MockHttpHandler(req =>
@@ -203,9 +205,11 @@ namespace A2A.Tests
             string capturedToolName = null;
             string capturedArgs = null;
 
-            string responseJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+            var resultMsg = A2AMessage.CreateUserTextMessage("ok");
+            string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
             {
-                Message = A2AMessage.CreateUserTextMessage("ok")
+                Id = "test",
+                Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
             }, s_jsonOptions);
 
             var handler = new MockHttpHandler(req =>
@@ -234,12 +238,32 @@ namespace A2A.Tests
         [Fact]
         public async Task InvokeAsync_AgentCardWithStreaming_UsesStreaming()
         {
+            string chunk1Json = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "stream",
+                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                {
+                    MessageId = "r1", Role = "agent",
+                    Parts = new List<A2APart> { A2APart.FromText("chunk1") }
+                }, s_jsonOptions)
+            }, s_jsonOptions);
+
+            string chunk2Json = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "stream",
+                Result = JsonSerializer.SerializeToElement(new A2AMessage
+                {
+                    MessageId = "r1", Role = "agent",
+                    Parts = new List<A2APart> { A2APart.FromText("chunk2") }
+                }, s_jsonOptions)
+            }, s_jsonOptions);
+
             string ssePayload =
                 "event: message\n" +
-                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\"chunk1\"}]}}\n" +
+                "data: " + chunk1Json + "\n" +
                 "\n" +
                 "event: message\n" +
-                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\",\"text\":\"chunk2\"}]}}\n" +
+                "data: " + chunk2Json + "\n" +
                 "\n" +
                 "event: complete\n" +
                 "data: {\"status\":\"completed\"}\n" +
@@ -272,17 +296,19 @@ namespace A2A.Tests
         [Fact]
         public async Task InvokeAsync_MultipleTextParts_Concatenates()
         {
-            string responseJson = JsonSerializer.Serialize(new A2ASendMessageResponse
+            var resultMsg = new A2AMessage
             {
-                Message = new A2AMessage
+                Role = "agent",
+                Parts = new List<A2APart>
                 {
-                    Role = "agent",
-                    Parts = new List<A2APart>
-                    {
-                        A2APart.FromText("Part 1. "),
-                        A2APart.FromText("Part 2.")
-                    }
+                    A2APart.FromText("Part 1. "),
+                    A2APart.FromText("Part 2.")
                 }
+            };
+            string responseJson = JsonSerializer.Serialize(new JsonRpcResponse
+            {
+                Id = "test",
+                Result = JsonSerializer.SerializeToElement(resultMsg, s_jsonOptions)
             }, s_jsonOptions);
 
             var handler = new MockHttpHandler(req =>

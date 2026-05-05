@@ -163,13 +163,14 @@ namespace A2A.Tests
                 server.Start();
                 int port = server.Port;
 
-                var request = new A2ASendMessageRequest
+                var rpcRequest = new JsonRpcRequest
                 {
-                    Message = A2AMessage.CreateUserTextMessage("Hello agent!"),
-                    Streaming = false
+                    Method = "message/send",
+                    Id = "test-req-1",
+                    Params = new MessageSendParams { Message = A2AMessage.CreateUserTextMessage("Hello agent!") }
                 };
 
-                string requestJson = JsonSerializer.Serialize(request, s_jsonOptions);
+                string requestJson = JsonSerializer.Serialize(rpcRequest, s_jsonOptions);
 
                 using (var client = new HttpClient())
                 {
@@ -179,14 +180,18 @@ namespace A2A.Tests
                     response.EnsureSuccessStatusCode();
                     string body = await response.Content.ReadAsStringAsync();
 
-                    A2ASendMessageResponse result = JsonSerializer
-                        .Deserialize<A2ASendMessageResponse>(body, s_jsonOptions);
+                    JsonRpcResponse result = JsonSerializer
+                        .Deserialize<JsonRpcResponse>(body, s_jsonOptions);
 
                     Assert.NotNull(result);
+                    Assert.Equal("2.0", result.JsonRpc);
+                    Assert.Equal("test-req-1", result.Id);
                     Assert.Null(result.Error);
-                    Assert.NotNull(result.Message);
-                    Assert.Equal("agent", result.Message.Role);
-                    Assert.Equal("You said: Hello agent!", result.Message.Parts[0].Text);
+                    Assert.True(result.Result.HasValue);
+
+                    A2AMessage msg = result.Result.Value.Deserialize<A2AMessage>(s_jsonOptions);
+                    Assert.Equal("agent", msg.Role);
+                    Assert.Equal("You said: Hello agent!", msg.Parts[0].Text);
                 }
             }
             finally
@@ -196,7 +201,7 @@ namespace A2A.Tests
         }
 
         [Fact]
-        public async Task HostServer_Returns400ForEmptyBody()
+        public async Task HostServer_ReturnsJsonRpcErrorForEmptyBody()
         {
             var config = CreateTestConfigWithPort(0);
 
@@ -212,7 +217,15 @@ namespace A2A.Tests
                     var content = new StringContent("", Encoding.UTF8, "application/json");
                     HttpResponseMessage response = await client.PostAsync(
                         $"http://localhost:{port}/a2a", content);
-                    Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+                    // Server returns 200 with JSON-RPC error (per JSON-RPC 2.0 spec)
+                    string body = await response.Content.ReadAsStringAsync();
+                    JsonRpcResponse result = JsonSerializer.Deserialize<JsonRpcResponse>(body, s_jsonOptions);
+
+                    Assert.NotNull(result);
+                    Assert.Equal("2.0", result.JsonRpc);
+                    Assert.NotNull(result.Error);
+                    Assert.Equal(-32700, result.Error.Code); // Parse error
                 }
             }
             finally
@@ -312,13 +325,14 @@ namespace A2A.Tests
                 server.Start();
                 int port = server.Port;
 
-                var request = new A2ASendMessageRequest
+                var rpcRequest = new JsonRpcRequest
                 {
-                    Message = A2AMessage.CreateUserTextMessage("stream test"),
-                    Streaming = true
+                    Method = "message/stream",
+                    Id = "stream-req-1",
+                    Params = new MessageStreamParams { Message = A2AMessage.CreateUserTextMessage("stream test") }
                 };
 
-                string requestJson = JsonSerializer.Serialize(request, s_jsonOptions);
+                string requestJson = JsonSerializer.Serialize(rpcRequest, s_jsonOptions);
 
                 using (var client = new HttpClient())
                 {
@@ -331,6 +345,8 @@ namespace A2A.Tests
                     Assert.Contains("event: message", body);
                     Assert.Contains("streaming response", body);
                     Assert.Contains("event: complete", body);
+                    // SSE message data should be JSON-RPC 2.0 response
+                    Assert.Contains("\"jsonrpc\":\"2.0\"", body);
                 }
             }
             finally

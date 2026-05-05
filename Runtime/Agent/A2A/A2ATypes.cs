@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace LiveLink.Agent.A2A
@@ -142,8 +143,81 @@ namespace LiveLink.Agent.A2A
         public string Uri { get; set; }
     }
 
+    // ───────────────────── JSON-RPC 2.0 Envelope Types ─────────────────────
+
     /// <summary>
-    /// Wire-format request for the A2A HTTP+JSON binding.
+    /// JSON-RPC 2.0 request envelope. All A2A requests MUST use this format.
+    /// </summary>
+    public class JsonRpcRequest
+    {
+        [JsonPropertyName("jsonrpc")]
+        public string JsonRpc { get; set; } = "2.0";
+
+        [JsonPropertyName("method")]
+        public string Method { get; set; }
+
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
+        [JsonPropertyName("params")]
+        public object Params { get; set; }
+    }
+
+    /// <summary>
+    /// JSON-RPC 2.0 response envelope. All A2A responses MUST use this format.
+    /// </summary>
+    public class JsonRpcResponse
+    {
+        [JsonPropertyName("jsonrpc")]
+        public string JsonRpc { get; set; } = "2.0";
+
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
+        [JsonPropertyName("result")]
+        public JsonElement? Result { get; set; }
+
+        [JsonPropertyName("error")]
+        public JsonRpcError Error { get; set; }
+    }
+
+    /// <summary>
+    /// JSON-RPC 2.0 error object.
+    /// </summary>
+    public class JsonRpcError
+    {
+        [JsonPropertyName("code")]
+        public int Code { get; set; }
+
+        [JsonPropertyName("message")]
+        public string Message { get; set; }
+
+        [JsonPropertyName("data")]
+        public object Data { get; set; }
+    }
+
+    /// <summary>
+    /// Params for the "message/send" JSON-RPC method.
+    /// </summary>
+    public class MessageSendParams
+    {
+        [JsonPropertyName("message")]
+        public A2AMessage Message { get; set; }
+    }
+
+    /// <summary>
+    /// Params for the "message/stream" JSON-RPC method.
+    /// </summary>
+    public class MessageStreamParams
+    {
+        [JsonPropertyName("message")]
+        public A2AMessage Message { get; set; }
+    }
+
+    // ───────────────────── Legacy Types (kept for backward compat) ─────────────────────
+
+    /// <summary>
+    /// Wire-format request for the A2A HTTP+JSON binding (legacy, pre-JSON-RPC).
     /// </summary>
     public class A2ASendMessageRequest
     {
@@ -155,7 +229,7 @@ namespace LiveLink.Agent.A2A
     }
 
     /// <summary>
-    /// Wire-format response for the A2A HTTP+JSON binding.
+    /// Wire-format response for the A2A HTTP+JSON binding (legacy, pre-JSON-RPC).
     /// </summary>
     public class A2ASendMessageResponse
     {

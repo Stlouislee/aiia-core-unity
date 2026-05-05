@@ -225,75 +225,139 @@ namespace LiveLink.Agent.A2A
         {
             if (string.IsNullOrWhiteSpace(request.Body))
             {
-                await WriteJsonResponseAsync(stream, 400, new { error = "Empty request body" });
+                await WriteJsonRpcErrorResponseAsync(stream, null, -32700, "Empty request body");
                 return;
             }
 
-            A2ASendMessageRequest sendRequest;
+            JsonRpcRequest rpcRequest;
             try
             {
-                sendRequest = JsonSerializer.Deserialize<A2ASendMessageRequest>(request.Body, s_jsonOptions);
+                rpcRequest = JsonSerializer.Deserialize<JsonRpcRequest>(request.Body, s_jsonOptions);
             }
             catch (JsonException ex)
             {
-                await WriteJsonResponseAsync(stream, 400, new { error = $"Invalid JSON: {ex.Message}" });
+                await WriteJsonRpcErrorResponseAsync(stream, null, -32700, $"Parse error: {ex.Message}");
                 return;
             }
 
-            if (sendRequest?.Message == null)
+            if (rpcRequest == null || string.IsNullOrEmpty(rpcRequest.Method))
             {
-                await WriteJsonResponseAsync(stream, 400, new { error = "Missing 'message' field" });
+                await WriteJsonRpcErrorResponseAsync(stream, rpcRequest?.Id, -32600, "Invalid Request: missing method");
                 return;
             }
 
-            // Extract text from the message parts.
-            string userText = ExtractText(sendRequest.Message);
+            // Route by JSON-RPC method
+            switch (rpcRequest.Method)
+            {
+                case "message/send":
+                    await HandleJsonRpcSendMessageAsync(rpcRequest, stream, ct);
+                    break;
+
+                case "message/stream":
+                    await HandleJsonRpcStreamMessageAsync(rpcRequest, stream, ct);
+                    break;
+
+                default:
+                    await WriteJsonRpcErrorResponseAsync(stream, rpcRequest.Id, -32601,
+                        $"Method not found: {rpcRequest.Method}");
+                    break;
+            }
+        }
+
+        private async Task HandleJsonRpcSendMessageAsync(JsonRpcRequest rpcRequest, NetworkStream stream, CancellationToken ct)
+        {
+            A2AMessage message = ExtractMessageFromParams(rpcRequest.Params);
+            if (message == null)
+            {
+                await WriteJsonRpcErrorResponseAsync(stream, rpcRequest.Id, -32602, "Invalid params: missing message");
+                return;
+            }
+
+            string userText = ExtractText(message);
             if (string.IsNullOrWhiteSpace(userText))
             {
-                await WriteJsonResponseAsync(stream, 400, new { error = "Message must contain at least one text part" });
+                await WriteJsonRpcErrorResponseAsync(stream, rpcRequest.Id, -32602,
+                    "Message must contain at least one text part");
                 return;
             }
 
-            // If streaming is requested and supported, use SSE.
-            if (sendRequest.Streaming && _config.EnableStreaming)
-            {
-                await HandleStreamingRequestAsync(userText, stream, ct);
-                return;
-            }
-
-            // Synchronous request.
             try
             {
                 string agentResponse = await _handleMessageAsync(userText, ct);
 
-                var response = new A2ASendMessageResponse
-                {
-                    Message = A2AMessage.CreateAgentTextMessage(agentResponse)
-                };
+                var resultMessage = A2AMessage.CreateAgentTextMessage(agentResponse);
+                string resultJson = JsonSerializer.Serialize(resultMessage, s_jsonOptions);
 
-                string responseJson = JsonSerializer.Serialize(response, s_jsonOptions);
-                await WriteRawJsonResponseAsync(stream, 200, responseJson);
+                await WriteJsonRpcSuccessResponseAsync(stream, rpcRequest.Id, resultJson);
             }
             catch (OperationCanceledException)
             {
-                await WriteJsonResponseAsync(stream, 504, new { error = "Agent request timed out" });
+                await WriteJsonRpcErrorResponseAsync(stream, rpcRequest.Id, -32000, "Agent request timed out");
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[LiveLink-A2A] Agent processing error: {ex.Message}");
-                await WriteJsonResponseAsync(stream, 500, new { error = $"Agent error: {ex.Message}" });
+                await WriteJsonRpcErrorResponseAsync(stream, rpcRequest.Id, -32000, $"Agent error: {ex.Message}");
             }
         }
 
-        private async Task HandleStreamingRequestAsync(string userText, NetworkStream stream, CancellationToken ct)
+        private async Task HandleJsonRpcStreamMessageAsync(JsonRpcRequest rpcRequest, NetworkStream stream, CancellationToken ct)
+        {
+            A2AMessage message = ExtractMessageFromParams(rpcRequest.Params);
+            if (message == null)
+            {
+                await WriteJsonRpcErrorResponseAsync(stream, rpcRequest.Id, -32602, "Invalid params: missing message");
+                return;
+            }
+
+            string userText = ExtractText(message);
+            if (string.IsNullOrWhiteSpace(userText))
+            {
+                await WriteJsonRpcErrorResponseAsync(stream, rpcRequest.Id, -32602,
+                    "Message must contain at least one text part");
+                return;
+            }
+
+            if (!_config.EnableStreaming)
+            {
+                await WriteJsonRpcErrorResponseAsync(stream, rpcRequest.Id, -32000, "Streaming is not enabled");
+                return;
+            }
+
+            await HandleStreamingRequestAsync(userText, rpcRequest.Id, stream, ct);
+        }
+
+        /// <summary>
+        /// Extracts the A2AMessage from JSON-RPC params (which may be a JsonElement or already deserialized).
+        /// </summary>
+        private static A2AMessage ExtractMessageFromParams(object @params)
+        {
+            if (@params == null) return null;
+
+            if (@params is A2AMessage msg) return msg;
+
+            if (@params is JsonElement element)
+            {
+                // Try MessageSendParams / MessageStreamParams structure first
+                if (element.TryGetProperty("message", out JsonElement messageElement))
+                {
+                    return messageElement.Deserialize<A2AMessage>(s_jsonOptions);
+                }
+
+                // Fallback: try direct message deserialization
+                return element.Deserialize<A2AMessage>(s_jsonOptions);
+            }
+
+            return null;
+        }
+
+        private async Task HandleStreamingRequestAsync(string userText, string requestId, NetworkStream stream, CancellationToken ct)
         {
             // Write SSE headers
             await WriteSseHeadersAsync(stream);
 
             try
             {
-                // For now, we send the complete response as a single SSE message event.
-                // Future: integrate with the agent's streaming API when available.
                 string agentResponse = await _handleMessageAsync(userText, ct);
 
                 var sseMessage = new A2AMessage
@@ -302,8 +366,13 @@ namespace LiveLink.Agent.A2A
                     Parts = new List<A2APart> { A2APart.FromText(agentResponse) }
                 };
 
-                var sseEvent = new A2AStreamingEvent { Message = sseMessage };
-                string eventJson = JsonSerializer.Serialize(sseEvent, s_jsonOptions);
+                // Wrap in JSON-RPC 2.0 response for SSE
+                var rpcResult = new JsonRpcResponse
+                {
+                    Id = requestId,
+                    Result = JsonSerializer.SerializeToElement(sseMessage, s_jsonOptions)
+                };
+                string eventJson = JsonSerializer.Serialize(rpcResult, s_jsonOptions);
 
                 await WriteSseEventAsync(stream, "message", eventJson);
 
@@ -489,6 +558,19 @@ namespace LiveLink.Agent.A2A
         private Task WriteRawJsonResponseAsync(NetworkStream stream, int statusCode, string rawJson)
         {
             return WriteHttpResponseAsync(stream, statusCode, "application/json", rawJson);
+        }
+
+        private Task WriteJsonRpcSuccessResponseAsync(NetworkStream stream, string requestId, string resultJson)
+        {
+            string responseJson = $"{{\"jsonrpc\":\"2.0\",\"id\":\"{EscapeJson(requestId)}\",\"result\":{resultJson}}}";
+            return WriteHttpResponseAsync(stream, 200, "application/json", responseJson);
+        }
+
+        private Task WriteJsonRpcErrorResponseAsync(NetworkStream stream, string requestId, int code, string message)
+        {
+            string idField = requestId != null ? $"\"{EscapeJson(requestId)}\"" : "null";
+            string responseJson = $"{{\"jsonrpc\":\"2.0\",\"id\":{idField},\"error\":{{\"code\":{code},\"message\":\"{EscapeJson(message)}\"}}}}";
+            return WriteHttpResponseAsync(stream, 200, "application/json", responseJson);
         }
 
         private async Task WriteSseHeadersAsync(NetworkStream stream)

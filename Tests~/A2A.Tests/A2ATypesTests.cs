@@ -198,6 +198,108 @@ namespace A2A.Tests
             Assert.Equal("Done!", resp.Message.Parts[0].Text);
         }
 
+        // ───────────────────── JSON-RPC 2.0 Envelope ─────────────────────
+
+        [Fact]
+        public void JsonRpcRequest_RoundTrip()
+        {
+            var req = new JsonRpcRequest
+            {
+                Method = "message/send",
+                Id = "req-1",
+                Params = new MessageSendParams { Message = A2AMessage.CreateUserTextMessage("hello") }
+            };
+
+            string json = JsonSerializer.Serialize(req, s_options);
+            JsonRpcRequest deserialized = JsonSerializer.Deserialize<JsonRpcRequest>(json, s_options);
+
+            Assert.Equal("2.0", deserialized.JsonRpc);
+            Assert.Equal("message/send", deserialized.Method);
+            Assert.Equal("req-1", deserialized.Id);
+            Assert.NotNull(deserialized.Params);
+        }
+
+        [Fact]
+        public void JsonRpcRequest_HasCorrectWireFormat()
+        {
+            var req = new JsonRpcRequest
+            {
+                Method = "message/send",
+                Id = "abc-123",
+                Params = new MessageSendParams { Message = A2AMessage.CreateUserTextMessage("test") }
+            };
+
+            string json = JsonSerializer.Serialize(req, s_options);
+
+            Assert.Contains("\"jsonrpc\":\"2.0\"", json);
+            Assert.Contains("\"method\":\"message/send\"", json);
+            Assert.Contains("\"id\":\"abc-123\"", json);
+            Assert.Contains("\"params\":", json);
+        }
+
+        [Fact]
+        public void JsonRpcResponse_WithError()
+        {
+            string json = @"{
+                ""jsonrpc"": ""2.0"",
+                ""id"": ""req-1"",
+                ""error"": { ""code"": -32600, ""message"": ""Invalid Request"" }
+            }";
+
+            JsonRpcResponse resp = JsonSerializer.Deserialize<JsonRpcResponse>(json, s_options);
+
+            Assert.Equal("2.0", resp.JsonRpc);
+            Assert.Equal("req-1", resp.Id);
+            Assert.False(resp.Result.HasValue);
+            Assert.NotNull(resp.Error);
+            Assert.Equal(-32600, resp.Error.Code);
+            Assert.Equal("Invalid Request", resp.Error.Message);
+        }
+
+        [Fact]
+        public void JsonRpcResponse_WithResult()
+        {
+            string json = @"{
+                ""jsonrpc"": ""2.0"",
+                ""id"": ""req-1"",
+                ""result"": {
+                    ""messageId"": ""r1"",
+                    ""role"": ""agent"",
+                    ""parts"": [{ ""type"": ""text"", ""text"": ""Done!"" }]
+                }
+            }";
+
+            JsonRpcResponse resp = JsonSerializer.Deserialize<JsonRpcResponse>(json, s_options);
+
+            Assert.Equal("2.0", resp.JsonRpc);
+            Assert.Equal("req-1", resp.Id);
+            Assert.Null(resp.Error);
+            Assert.True(resp.Result.HasValue);
+
+            A2AMessage msg = resp.Result.Value.Deserialize<A2AMessage>(s_options);
+            Assert.Equal("Done!", msg.Parts[0].Text);
+        }
+
+        [Fact]
+        public void MessageSendParams_RoundTrip()
+        {
+            var p = new MessageSendParams { Message = A2AMessage.CreateUserTextMessage("hi") };
+            string json = JsonSerializer.Serialize(p, s_options);
+            MessageSendParams d = JsonSerializer.Deserialize<MessageSendParams>(json, s_options);
+
+            Assert.Equal("hi", d.Message.Parts[0].Text);
+        }
+
+        [Fact]
+        public void MessageStreamParams_RoundTrip()
+        {
+            var p = new MessageStreamParams { Message = A2AMessage.CreateUserTextMessage("stream") };
+            string json = JsonSerializer.Serialize(p, s_options);
+            MessageStreamParams d = JsonSerializer.Deserialize<MessageStreamParams>(json, s_options);
+
+            Assert.Equal("stream", d.Message.Parts[0].Text);
+        }
+
         // ───────────────────── Streaming Event ─────────────────────
 
         [Fact]

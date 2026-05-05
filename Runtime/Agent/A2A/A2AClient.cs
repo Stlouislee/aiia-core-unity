@@ -145,7 +145,7 @@ namespace LiveLink.Agent.A2A
         }
 
         /// <summary>
-        /// Send a synchronous message to the remote A2A agent.
+        /// Send a synchronous message to the remote A2A agent using JSON-RPC 2.0 "message/send".
         /// </summary>
         public async Task<A2AMessage> SendMessageAsync(
             A2AMessage message,
@@ -153,13 +153,14 @@ namespace LiveLink.Agent.A2A
         {
             ThrowIfDisposed();
 
-            var request = new A2ASendMessageRequest
+            var rpcRequest = new JsonRpcRequest
             {
-                Message = message,
-                Streaming = false
+                Method = "message/send",
+                Id = Guid.NewGuid().ToString("N"),
+                Params = new MessageSendParams { Message = message }
             };
 
-            string json = JsonSerializer.Serialize(request, s_jsonOptions);
+            string json = JsonSerializer.Serialize(rpcRequest, s_jsonOptions);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
 
             Log("Sending message to {0} ({1})", _endpoint, message.MessageId);
@@ -171,21 +172,27 @@ namespace LiveLink.Agent.A2A
                 response.EnsureSuccessStatusCode();
 
                 string responseJson = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                A2ASendMessageResponse result = JsonSerializer
-                    .Deserialize<A2ASendMessageResponse>(responseJson, s_jsonOptions);
+                JsonRpcResponse rpcResponse = JsonSerializer
+                    .Deserialize<JsonRpcResponse>(responseJson, s_jsonOptions);
 
-                if (result?.Error != null)
+                if (rpcResponse?.Error != null)
                 {
                     throw new InvalidOperationException(string.Format(
-                        "A2A error {0}: {1}", result.Error.Code, result.Error.Message));
+                        "A2A error {0}: {1}", rpcResponse.Error.Code, rpcResponse.Error.Message));
                 }
 
-                return result?.Message;
+                if (rpcResponse?.Result.HasValue == true)
+                {
+                    return rpcResponse.Result.Value.Deserialize<A2AMessage>(s_jsonOptions);
+                }
+
+                return null;
             }
         }
 
         /// <summary>
-        /// Send a streaming message. Chunks arrive via the callback as SSE events.
+        /// Send a streaming message using JSON-RPC 2.0 "message/stream" method.
+        /// Chunks arrive via the callback as SSE events.
         /// Automatically reconnects on connection drops (up to <see cref="MaxReconnectAttempts"/>).
         /// Returns the aggregated list of message chunks.
         /// </summary>
@@ -196,11 +203,14 @@ namespace LiveLink.Agent.A2A
         {
             ThrowIfDisposed();
 
-            string json = JsonSerializer.Serialize(new A2ASendMessageRequest
+            var rpcRequest = new JsonRpcRequest
             {
-                Message = message,
-                Streaming = true
-            }, s_jsonOptions);
+                Method = "message/stream",
+                Id = Guid.NewGuid().ToString("N"),
+                Params = new MessageStreamParams { Message = message }
+            };
+
+            string json = JsonSerializer.Serialize(rpcRequest, s_jsonOptions);
 
             Log("Sending streaming message to {0} ({1})", _endpoint, message.MessageId);
 
@@ -376,6 +386,7 @@ namespace LiveLink.Agent.A2A
 
         /// <summary>
         /// Processes a single SSE event. Returns true if the event was a "complete" event.
+        /// Message events are now JSON-RPC 2.0 responses with the A2AMessage in the result field.
         /// </summary>
         private static bool ProcessSseEvent(
             string eventType,
@@ -390,13 +401,24 @@ namespace LiveLink.Agent.A2A
                 if (string.Equals(eventType, "message", StringComparison.OrdinalIgnoreCase)
                     || string.IsNullOrEmpty(eventType))
                 {
-                    A2AStreamingEvent evt = JsonSerializer
-                        .Deserialize<A2AStreamingEvent>(data, s_jsonOptions);
+                    // Try JSON-RPC 2.0 response format first
+                    JsonRpcResponse rpcResponse = JsonSerializer
+                        .Deserialize<JsonRpcResponse>(data, s_jsonOptions);
 
-                    if (evt?.Message != null)
+                    if (rpcResponse?.Result.HasValue == true)
                     {
-                        messages.Add(evt.Message);
-                        onMessageChunk?.Invoke(evt.Message);
+                        A2AMessage msg = rpcResponse.Result.Value
+                            .Deserialize<A2AMessage>(s_jsonOptions);
+                        if (msg != null)
+                        {
+                            messages.Add(msg);
+                            onMessageChunk?.Invoke(msg);
+                        }
+                    }
+                    else if (rpcResponse?.Error != null)
+                    {
+                        LogError("Streaming JSON-RPC error {0}: {1}",
+                            rpcResponse.Error.Code, rpcResponse.Error.Message);
                     }
 
                     return false;
