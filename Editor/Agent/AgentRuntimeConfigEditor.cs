@@ -34,6 +34,7 @@ namespace LiveLink.Agent.Editor
         private SerializedProperty _autoStartLocalLiveLinkMcp;
         private SerializedProperty _localHttpTransportMode;
         private SerializedProperty _localConnectionTimeoutSeconds;
+        private SerializedProperty _localReadinessTimeoutSeconds;
         private SerializedProperty _allowSceneMutationTools;
         private SerializedProperty _enablePersistentChatHistory;
         private SerializedProperty _chatHistoryConversationId;
@@ -59,6 +60,7 @@ namespace LiveLink.Agent.Editor
             _autoStartLocalLiveLinkMcp = serializedObject.FindProperty("_autoStartLocalLiveLinkMcp");
             _localHttpTransportMode = serializedObject.FindProperty("_localHttpTransportMode");
             _localConnectionTimeoutSeconds = serializedObject.FindProperty("_localConnectionTimeoutSeconds");
+            _localReadinessTimeoutSeconds = serializedObject.FindProperty("_localReadinessTimeoutSeconds");
             _allowSceneMutationTools = serializedObject.FindProperty("_allowSceneMutationTools");
             _enablePersistentChatHistory = serializedObject.FindProperty("_enablePersistentChatHistory");
             _chatHistoryConversationId = serializedObject.FindProperty("_chatHistoryConversationId");
@@ -137,6 +139,7 @@ namespace LiveLink.Agent.Editor
                 EditorGUILayout.PropertyField(_autoStartLocalLiveLinkMcp, new GUIContent("Auto Start Local MCP"));
                 EditorGUILayout.PropertyField(_localHttpTransportMode, new GUIContent("HTTP Transport Mode"));
                 EditorGUILayout.PropertyField(_localConnectionTimeoutSeconds, new GUIContent("Connection Timeout (Seconds)"));
+                EditorGUILayout.PropertyField(_localReadinessTimeoutSeconds, new GUIContent("Readiness Timeout (Seconds)", "Maximum seconds to wait for the local MCP server health check after auto-starting."));
                 EditorGUI.indentLevel--;
 
                 if ((AgentMcpHttpTransportMode)_localHttpTransportMode.enumValueIndex == AgentMcpHttpTransportMode.Sse)

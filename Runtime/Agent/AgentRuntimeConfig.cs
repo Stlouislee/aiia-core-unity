@@ -59,6 +59,9 @@ namespace LiveLink.Agent
         private float _localConnectionTimeoutSeconds = 15f;
 
         [SerializeField]
+        private float _localReadinessTimeoutSeconds = 10f;
+
+        [SerializeField]
         private bool _allowSceneMutationTools = true;
 
         [Header("Chat History Persistence")]
@@ -106,6 +109,12 @@ namespace LiveLink.Agent
         public bool AutoStartLocalLiveLinkMcp => _autoStartLocalLiveLinkMcp;
         public AgentMcpHttpTransportMode LocalHttpTransportMode => _localHttpTransportMode;
         public float LocalConnectionTimeoutSeconds => _localConnectionTimeoutSeconds;
+
+        /// <summary>
+        /// Maximum seconds to wait for the local LiveLink MCP server to become healthy after starting.
+        /// </summary>
+        public float LocalReadinessTimeoutSeconds => Mathf.Max(3f, _localReadinessTimeoutSeconds);
+
         public bool AllowSceneMutationTools => _allowSceneMutationTools;
         public bool EnablePersistentChatHistory => _enablePersistentChatHistory;
         public string ChatHistoryConversationId => _chatHistoryConversationId;

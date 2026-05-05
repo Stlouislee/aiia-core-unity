@@ -27,7 +27,7 @@ namespace LiveLink.Agent
     [AddComponentMenu("LiveLink/Embedded Agent Runtime")]
     public class EmbeddedAgentRuntime : MonoBehaviour
     {
-        private const int LocalServerReadinessTimeoutSeconds = 3;
+        private const int DefaultLocalServerReadinessTimeoutSeconds = 10;
         private const int LocalServerReadinessPollIntervalMs = 100;
         private const int ToolDiscoveryTimeoutSeconds = 15;
         private const int AgentSessionInitializationTimeoutSeconds = 30;
@@ -918,7 +918,8 @@ namespace LiveLink.Agent
         private async Task WaitForLocalServerReadinessAsync(CancellationToken cancellationToken)
         {
             Uri healthUri = BuildLocalHealthUri();
-            DateTime deadlineUtc = DateTime.UtcNow.AddSeconds(LocalServerReadinessTimeoutSeconds);
+            float readinessTimeout = _config != null ? _config.LocalReadinessTimeoutSeconds : DefaultLocalServerReadinessTimeoutSeconds;
+            DateTime deadlineUtc = DateTime.UtcNow.AddSeconds(readinessTimeout);
             Exception lastException = null;
 
             while (DateTime.UtcNow < deadlineUtc)
@@ -944,12 +945,12 @@ namespace LiveLink.Agent
             if (lastException != null)
             {
                 throw new TimeoutException(
-                    $"Local LiveLink MCP did not become healthy within {LocalServerReadinessTimeoutSeconds} seconds ({healthUri}). Last error: {lastException.Message}",
+                    $"Local LiveLink MCP did not become healthy within {readinessTimeout} seconds ({healthUri}). Last error: {lastException.Message}",
                     lastException);
             }
 
             throw new TimeoutException(
-                $"Local LiveLink MCP did not become healthy within {LocalServerReadinessTimeoutSeconds} seconds ({healthUri}).");
+                $"Local LiveLink MCP did not become healthy within {readinessTimeout} seconds ({healthUri}).");
         }
 
         private Uri BuildLocalHealthUri()
