@@ -184,6 +184,70 @@ namespace LiveLink.Agent.A2A
         Data
     }
 
+    // ───────────────────── TaskState Converter ─────────────────────
+
+    /// <summary>
+    /// Converts A2ATaskState to/from SCREAMING_SNAKE_CASE strings per A2A v1.0 spec.
+    /// </summary>
+    internal sealed class TaskStateJsonConverter : JsonConverter<A2ATaskState>
+    {
+        private static readonly Dictionary<A2ATaskState, string> s_toString = new Dictionary<A2ATaskState, string>
+        {
+            [A2ATaskState.Unspecified] = "TASK_STATE_UNSPECIFIED",
+            [A2ATaskState.Submitted] = "TASK_STATE_SUBMITTED",
+            [A2ATaskState.Working] = "TASK_STATE_WORKING",
+            [A2ATaskState.Completed] = "TASK_STATE_COMPLETED",
+            [A2ATaskState.Failed] = "TASK_STATE_FAILED",
+            [A2ATaskState.Canceled] = "TASK_STATE_CANCELED",
+            [A2ATaskState.InputRequired] = "TASK_STATE_INPUT_REQUIRED",
+            [A2ATaskState.Rejected] = "TASK_STATE_REJECTED",
+            [A2ATaskState.AuthRequired] = "TASK_STATE_AUTH_REQUIRED"
+        };
+
+        private static readonly Dictionary<string, A2ATaskState> s_fromString =
+            new Dictionary<string, A2ATaskState>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["TASK_STATE_UNSPECIFIED"] = A2ATaskState.Unspecified,
+                ["TASK_STATE_SUBMITTED"] = A2ATaskState.Submitted,
+                ["TASK_STATE_WORKING"] = A2ATaskState.Working,
+                ["TASK_STATE_COMPLETED"] = A2ATaskState.Completed,
+                ["TASK_STATE_FAILED"] = A2ATaskState.Failed,
+                ["TASK_STATE_CANCELED"] = A2ATaskState.Canceled,
+                ["TASK_STATE_INPUT_REQUIRED"] = A2ATaskState.InputRequired,
+                ["TASK_STATE_REJECTED"] = A2ATaskState.Rejected,
+                ["TASK_STATE_AUTH_REQUIRED"] = A2ATaskState.AuthRequired,
+                // Also accept short names for convenience
+                ["UNSPECIFIED"] = A2ATaskState.Unspecified,
+                ["SUBMITTED"] = A2ATaskState.Submitted,
+                ["WORKING"] = A2ATaskState.Working,
+                ["COMPLETED"] = A2ATaskState.Completed,
+                ["FAILED"] = A2ATaskState.Failed,
+                ["CANCELED"] = A2ATaskState.Canceled,
+                ["INPUT_REQUIRED"] = A2ATaskState.InputRequired,
+                ["REJECTED"] = A2ATaskState.Rejected,
+                ["AUTH_REQUIRED"] = A2ATaskState.AuthRequired
+            };
+
+        public override A2ATaskState Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            string value = reader.GetString();
+            if (string.IsNullOrEmpty(value)) return A2ATaskState.Unspecified;
+
+            if (s_fromString.TryGetValue(value, out A2ATaskState state))
+                return state;
+
+            throw new JsonException($"Unknown TaskState value: {value}");
+        }
+
+        public override void Write(Utf8JsonWriter writer, A2ATaskState value, JsonSerializerOptions options)
+        {
+            if (s_toString.TryGetValue(value, out string str))
+                writer.WriteStringValue(str);
+            else
+                writer.WriteStringValue("TASK_STATE_UNSPECIFIED");
+        }
+    }
+
     // ───────────────────── Role Converter ─────────────────────
 
     /// <summary>
@@ -315,6 +379,158 @@ namespace LiveLink.Agent.A2A
 
             writer.WriteEndObject();
         }
+    }
+
+    // ───────────────────── A2A v1.0 Core Types ─────────────────────
+
+    /// <summary>
+    /// Task is the core unit of action in A2A. It has a current status
+    /// and when results are created for the task they are stored in artifacts.
+    /// Ref: A2A spec section 4.1.1
+    /// </summary>
+    public class A2ATask
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
+        [JsonPropertyName("contextId")]
+        public string ContextId { get; set; }
+
+        [JsonPropertyName("status")]
+        public A2ATaskStatus Status { get; set; }
+
+        [JsonPropertyName("artifacts")]
+        public List<A2AArtifact> Artifacts { get; set; } = new List<A2AArtifact>();
+
+        [JsonPropertyName("history")]
+        public List<A2AMessage> History { get; set; } = new List<A2AMessage>();
+
+        [JsonPropertyName("metadata")]
+        public Dictionary<string, object> Metadata { get; set; }
+    }
+
+    /// <summary>
+    /// Defines the possible lifecycle states of a Task.
+    /// Serialized as SCREAMING_SNAKE_CASE per A2A v1.0 spec.
+    /// Ref: A2A spec section 4.1.2
+    /// </summary>
+    [JsonConverter(typeof(TaskStateJsonConverter))]
+    public enum A2ATaskState
+    {
+        Unspecified = 0,
+        Submitted = 1,
+        Working = 2,
+        Completed = 3,
+        Failed = 4,
+        Canceled = 5,
+        InputRequired = 6,
+        Rejected = 7,
+        AuthRequired = 8
+    }
+
+    /// <summary>
+    /// A container for the status of a task.
+    /// Ref: A2A spec section 4.1.3
+    /// </summary>
+    public class A2ATaskStatus
+    {
+        [JsonPropertyName("state")]
+        public A2ATaskState State { get; set; }
+
+        [JsonPropertyName("message")]
+        public A2AMessage Message { get; set; }
+
+        [JsonPropertyName("timestamp")]
+        public string Timestamp { get; set; }
+    }
+
+    /// <summary>
+    /// Artifacts represent task outputs.
+    /// Ref: A2A spec section 4.1.7
+    /// </summary>
+    public class A2AArtifact
+    {
+        [JsonPropertyName("artifactId")]
+        public string ArtifactId { get; set; }
+
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
+
+        [JsonPropertyName("description")]
+        public string Description { get; set; }
+
+        [JsonPropertyName("parts")]
+        public List<A2APart> Parts { get; set; } = new List<A2APart>();
+
+        [JsonPropertyName("metadata")]
+        public Dictionary<string, object> Metadata { get; set; }
+
+        [JsonPropertyName("extensions")]
+        public List<string> Extensions { get; set; } = new List<string>();
+    }
+
+    /// <summary>
+    /// An event sent by the agent to notify the client of a change in a task's status.
+    /// Ref: A2A spec section 4.1.8
+    /// </summary>
+    public class A2ATaskStatusUpdateEvent
+    {
+        [JsonPropertyName("taskId")]
+        public string TaskId { get; set; }
+
+        [JsonPropertyName("contextId")]
+        public string ContextId { get; set; }
+
+        [JsonPropertyName("status")]
+        public A2ATaskStatus Status { get; set; }
+
+        [JsonPropertyName("metadata")]
+        public Dictionary<string, object> Metadata { get; set; }
+    }
+
+    /// <summary>
+    /// A task delta where an artifact has been generated.
+    /// Ref: A2A spec section 4.1.9
+    /// </summary>
+    public class A2ATaskArtifactUpdateEvent
+    {
+        [JsonPropertyName("taskId")]
+        public string TaskId { get; set; }
+
+        [JsonPropertyName("contextId")]
+        public string ContextId { get; set; }
+
+        [JsonPropertyName("artifact")]
+        public A2AArtifact Artifact { get; set; }
+
+        [JsonPropertyName("append")]
+        public bool Append { get; set; }
+
+        [JsonPropertyName("lastChunk")]
+        public bool LastChunk { get; set; }
+
+        [JsonPropertyName("metadata")]
+        public Dictionary<string, object> Metadata { get; set; }
+    }
+
+    /// <summary>
+    /// A wrapper object used in streaming operations (v1.0).
+    /// Contains one of: Task, Message, TaskStatusUpdateEvent, TaskArtifactUpdateEvent.
+    /// Ref: A2A spec section 5.2
+    /// </summary>
+    public class A2AStreamResponse
+    {
+        [JsonPropertyName("task")]
+        public A2ATask Task { get; set; }
+
+        [JsonPropertyName("message")]
+        public A2AMessage Message { get; set; }
+
+        [JsonPropertyName("statusUpdate")]
+        public A2ATaskStatusUpdateEvent StatusUpdate { get; set; }
+
+        [JsonPropertyName("artifactUpdate")]
+        public A2ATaskArtifactUpdateEvent ArtifactUpdate { get; set; }
     }
 
     // ───────────────────── JSON-RPC 2.0 Envelope Types ─────────────────────

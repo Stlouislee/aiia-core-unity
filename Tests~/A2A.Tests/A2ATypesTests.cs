@@ -464,5 +464,338 @@ namespace A2A.Tests
             Assert.Equal("completed", evt.Status);
             Assert.Null(evt.Message);
         }
+
+        // ───────────────────── Task (A2A v1.0 Core) ─────────────────────
+
+        [Fact]
+        public void Task_RoundTrip()
+        {
+            var task = new A2ATask
+            {
+                Id = "task-001",
+                ContextId = "ctx-abc",
+                Status = new A2ATaskStatus
+                {
+                    State = A2ATaskState.Working,
+                    Message = A2AMessage.CreateAgentTextMessage("Processing..."),
+                    Timestamp = "2026-05-05T14:00:00Z"
+                },
+                Artifacts = new List<A2AArtifact>(),
+                History = new List<A2AMessage>(),
+                Metadata = new Dictionary<string, object> { ["source"] = "test" }
+            };
+
+            string json = JsonSerializer.Serialize(task, s_options);
+            A2ATask deserialized = JsonSerializer.Deserialize<A2ATask>(json, s_options);
+
+            Assert.Equal("task-001", deserialized.Id);
+            Assert.Equal("ctx-abc", deserialized.ContextId);
+            Assert.Equal(A2ATaskState.Working, deserialized.Status.State);
+            Assert.Equal("Processing...", deserialized.Status.Message.Parts[0].Text);
+            Assert.Equal("2026-05-05T14:00:00Z", deserialized.Status.Timestamp);
+            Assert.NotNull(deserialized.Metadata);
+            Assert.True(deserialized.Metadata.ContainsKey("source"));
+            // System.Text.Json deserializes object values as JsonElement
+            var sourceValue = (JsonElement)deserialized.Metadata["source"];
+            Assert.Equal("test", sourceValue.GetString());
+        }
+
+        [Fact]
+        public void Task_HasCorrectWireFormat()
+        {
+            var task = new A2ATask
+            {
+                Id = "t1",
+                ContextId = "c1",
+                Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+            };
+
+            string json = JsonSerializer.Serialize(task, s_options);
+
+            Assert.Contains("\"id\":\"t1\"", json);
+            Assert.Contains("\"contextId\":\"c1\"", json);
+            Assert.Contains("\"TASK_STATE_COMPLETED\"", json);
+            // Should NOT contain legacy field names
+            Assert.DoesNotContain("\"context_id\"", json);
+            Assert.DoesNotContain("\"Completed\"", json); // must be SCREAMING_SNAKE_CASE
+        }
+
+        [Fact]
+        public void Task_DeserializesFromSpecJson()
+        {
+            // Matches the wire format from A2A spec examples
+            string json = @"{
+                ""id"": ""task-123"",
+                ""contextId"": ""session-456"",
+                ""status"": {
+                    ""state"": ""TASK_STATE_SUBMITTED"",
+                    ""timestamp"": ""2026-05-05T10:00:00Z""
+                },
+                ""artifacts"": [],
+                ""history"": []
+            }";
+
+            A2ATask task = JsonSerializer.Deserialize<A2ATask>(json, s_options);
+
+            Assert.Equal("task-123", task.Id);
+            Assert.Equal("session-456", task.ContextId);
+            Assert.Equal(A2ATaskState.Submitted, task.Status.State);
+            Assert.Equal("2026-05-05T10:00:00Z", task.Status.Timestamp);
+            Assert.Empty(task.Artifacts);
+            Assert.Empty(task.History);
+        }
+
+        [Fact]
+        public void TaskState_AllValues_SerializeCorrectly()
+        {
+            // Verify all 9 TaskState values round-trip
+            var states = new Dictionary<A2ATaskState, string>
+            {
+                [A2ATaskState.Unspecified] = "TASK_STATE_UNSPECIFIED",
+                [A2ATaskState.Submitted] = "TASK_STATE_SUBMITTED",
+                [A2ATaskState.Working] = "TASK_STATE_WORKING",
+                [A2ATaskState.Completed] = "TASK_STATE_COMPLETED",
+                [A2ATaskState.Failed] = "TASK_STATE_FAILED",
+                [A2ATaskState.Canceled] = "TASK_STATE_CANCELED",
+                [A2ATaskState.InputRequired] = "TASK_STATE_INPUT_REQUIRED",
+                [A2ATaskState.Rejected] = "TASK_STATE_REJECTED",
+                [A2ATaskState.AuthRequired] = "TASK_STATE_AUTH_REQUIRED"
+            };
+
+            foreach (var kvp in states)
+            {
+                var status = new A2ATaskStatus { State = kvp.Key };
+                string json = JsonSerializer.Serialize(status, s_options);
+                Assert.Contains($"\"{kvp.Value}\"", json);
+
+                A2ATaskStatus deserialized = JsonSerializer.Deserialize<A2ATaskStatus>(json, s_options);
+                Assert.Equal(kvp.Key, deserialized.State);
+            }
+        }
+
+        [Fact]
+        public void TaskStatus_RoundTrip()
+        {
+            var status = new A2ATaskStatus
+            {
+                State = A2ATaskState.Completed,
+                Message = A2AMessage.CreateAgentTextMessage("Done!"),
+                Timestamp = "2026-05-05T15:30:00Z"
+            };
+
+            string json = JsonSerializer.Serialize(status, s_options);
+            A2ATaskStatus deserialized = JsonSerializer.Deserialize<A2ATaskStatus>(json, s_options);
+
+            Assert.Equal(A2ATaskState.Completed, deserialized.State);
+            Assert.Equal("Done!", deserialized.Message.Parts[0].Text);
+            Assert.Equal("2026-05-05T15:30:00Z", deserialized.Timestamp);
+        }
+
+        // ───────────────────── Artifact ─────────────────────
+
+        [Fact]
+        public void Artifact_RoundTrip()
+        {
+            var artifact = new A2AArtifact
+            {
+                ArtifactId = "art-001",
+                Name = "result.json",
+                Description = "Output data",
+                Parts = new List<A2APart>
+                {
+                    A2APart.FromData(new Dictionary<string, object> { ["count"] = 42 }, "application/json")
+                },
+                Metadata = new Dictionary<string, object> { ["format"] = "json" },
+                Extensions = new List<string> { "ext-1" }
+            };
+
+            string json = JsonSerializer.Serialize(artifact, s_options);
+            A2AArtifact deserialized = JsonSerializer.Deserialize<A2AArtifact>(json, s_options);
+
+            Assert.Equal("art-001", deserialized.ArtifactId);
+            Assert.Equal("result.json", deserialized.Name);
+            Assert.Equal("Output data", deserialized.Description);
+            Assert.Single(deserialized.Parts);
+            Assert.Equal(PartKind.Data, deserialized.Parts[0].Kind);
+            Assert.NotNull(deserialized.Metadata);
+            Assert.Single(deserialized.Extensions);
+            Assert.Equal("ext-1", deserialized.Extensions[0]);
+        }
+
+        [Fact]
+        public void Artifact_WithTextPart_RoundTrip()
+        {
+            var artifact = new A2AArtifact
+            {
+                ArtifactId = "art-text",
+                Name = "summary",
+                Parts = new List<A2APart> { A2APart.FromText("Here is your summary.") }
+            };
+
+            string json = JsonSerializer.Serialize(artifact, s_options);
+            A2AArtifact deserialized = JsonSerializer.Deserialize<A2AArtifact>(json, s_options);
+
+            Assert.Equal("art-text", deserialized.ArtifactId);
+            Assert.Equal("Here is your summary.", deserialized.Parts[0].Text);
+        }
+
+        [Fact]
+        public void Artifact_HasCorrectWireFormat()
+        {
+            var artifact = new A2AArtifact
+            {
+                ArtifactId = "a1",
+                Name = "test",
+                Parts = new List<A2APart> { A2APart.FromText("content") }
+            };
+
+            string json = JsonSerializer.Serialize(artifact, s_options);
+
+            Assert.Contains("\"artifactId\":\"a1\"", json);
+            Assert.Contains("\"name\":\"test\"", json);
+            // Should NOT contain legacy field names
+            Assert.DoesNotContain("\"artifact_id\"", json);
+        }
+
+        // ───────────────────── Streaming Events (v1.0) ─────────────────────
+
+        [Fact]
+        public void TaskStatusUpdateEvent_RoundTrip()
+        {
+            var evt = new A2ATaskStatusUpdateEvent
+            {
+                TaskId = "task-001",
+                ContextId = "ctx-abc",
+                Status = new A2ATaskStatus
+                {
+                    State = A2ATaskState.Completed,
+                    Timestamp = "2026-05-05T16:00:00Z"
+                }
+            };
+
+            string json = JsonSerializer.Serialize(evt, s_options);
+            A2ATaskStatusUpdateEvent deserialized = JsonSerializer
+                .Deserialize<A2ATaskStatusUpdateEvent>(json, s_options);
+
+            Assert.Equal("task-001", deserialized.TaskId);
+            Assert.Equal("ctx-abc", deserialized.ContextId);
+            Assert.Equal(A2ATaskState.Completed, deserialized.Status.State);
+        }
+
+        [Fact]
+        public void TaskArtifactUpdateEvent_RoundTrip()
+        {
+            var evt = new A2ATaskArtifactUpdateEvent
+            {
+                TaskId = "task-001",
+                ContextId = "ctx-abc",
+                Artifact = new A2AArtifact
+                {
+                    ArtifactId = "art-001",
+                    Name = "output",
+                    Parts = new List<A2APart> { A2APart.FromText("chunk data") }
+                },
+                Append = true,
+                LastChunk = false
+            };
+
+            string json = JsonSerializer.Serialize(evt, s_options);
+            A2ATaskArtifactUpdateEvent deserialized = JsonSerializer
+                .Deserialize<A2ATaskArtifactUpdateEvent>(json, s_options);
+
+            Assert.Equal("task-001", deserialized.TaskId);
+            Assert.Equal("ctx-abc", deserialized.ContextId);
+            Assert.Equal("art-001", deserialized.Artifact.ArtifactId);
+            Assert.True(deserialized.Append);
+            Assert.False(deserialized.LastChunk);
+        }
+
+        [Fact]
+        public void StreamResponse_WrapsTask()
+        {
+            var resp = new A2AStreamResponse
+            {
+                Task = new A2ATask
+                {
+                    Id = "t1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Submitted }
+                }
+            };
+
+            string json = JsonSerializer.Serialize(resp, s_options);
+            A2AStreamResponse deserialized = JsonSerializer.Deserialize<A2AStreamResponse>(json, s_options);
+
+            Assert.NotNull(deserialized.Task);
+            Assert.Null(deserialized.Message);
+            Assert.Null(deserialized.StatusUpdate);
+            Assert.Null(deserialized.ArtifactUpdate);
+            Assert.Equal("t1", deserialized.Task.Id);
+        }
+
+        [Fact]
+        public void StreamResponse_WrapsStatusUpdate()
+        {
+            var resp = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1",
+                    ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Completed }
+                }
+            };
+
+            string json = JsonSerializer.Serialize(resp, s_options);
+            A2AStreamResponse deserialized = JsonSerializer.Deserialize<A2AStreamResponse>(json, s_options);
+
+            Assert.Null(deserialized.Task);
+            Assert.NotNull(deserialized.StatusUpdate);
+            Assert.Equal("t1", deserialized.StatusUpdate.TaskId);
+            Assert.Equal(A2ATaskState.Completed, deserialized.StatusUpdate.Status.State);
+        }
+
+        [Fact]
+        public void StreamResponse_WrapsArtifactUpdate()
+        {
+            var resp = new A2AStreamResponse
+            {
+                ArtifactUpdate = new A2ATaskArtifactUpdateEvent
+                {
+                    TaskId = "t1",
+                    ContextId = "c1",
+                    Artifact = new A2AArtifact
+                    {
+                        ArtifactId = "a1",
+                        Parts = new List<A2APart> { A2APart.FromText("data") }
+                    }
+                }
+            };
+
+            string json = JsonSerializer.Serialize(resp, s_options);
+            A2AStreamResponse deserialized = JsonSerializer.Deserialize<A2AStreamResponse>(json, s_options);
+
+            Assert.NotNull(deserialized.ArtifactUpdate);
+            Assert.Equal("a1", deserialized.ArtifactUpdate.Artifact.ArtifactId);
+        }
+
+        [Fact]
+        public void StreamResponse_HasCorrectWireFormat()
+        {
+            // v1.0: streaming events use member-name discriminator (no "kind" field)
+            var resp = new A2AStreamResponse
+            {
+                StatusUpdate = new A2ATaskStatusUpdateEvent
+                {
+                    TaskId = "t1",
+                    ContextId = "c1",
+                    Status = new A2ATaskStatus { State = A2ATaskState.Working }
+                }
+            };
+
+            string json = JsonSerializer.Serialize(resp, s_options);
+
+            Assert.Contains("\"statusUpdate\"", json);
+            Assert.DoesNotContain("\"kind\"", json);
+        }
     }
 }
