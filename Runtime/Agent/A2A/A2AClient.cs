@@ -192,6 +192,102 @@ namespace LiveLink.Agent.A2A
         }
 
         /// <summary>
+        /// Get the current state of a task using JSON-RPC 2.0 "tasks/get" method.
+        /// Returns the task with its status, artifacts, and optionally conversation history.
+        /// Ref: A2A spec section 7.1
+        /// </summary>
+        public async Task<A2ATask> GetTaskAsync(
+            GetTaskRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            ThrowIfDisposed();
+
+            var rpcRequest = new JsonRpcRequest
+            {
+                Method = "tasks/get",
+                Id = Guid.NewGuid().ToString("N"),
+                Params = request
+            };
+
+            string json = JsonSerializer.Serialize(rpcRequest, s_jsonOptions);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            Log("Getting task {0} from {1}", request.Id, _endpoint);
+
+            using (HttpRequestMessage httpRequest = BuildPostRequest(content))
+            {
+                HttpResponseMessage response = await _httpClient
+                    .SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+                response.EnsureSuccessStatusCode();
+
+                string responseJson = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                JsonRpcResponse rpcResponse = JsonSerializer
+                    .Deserialize<JsonRpcResponse>(responseJson, s_jsonOptions);
+
+                if (rpcResponse?.Error != null)
+                {
+                    throw new InvalidOperationException(string.Format(
+                        "A2A error {0}: {1}", rpcResponse.Error.Code, rpcResponse.Error.Message));
+                }
+
+                if (rpcResponse?.Result.HasValue == true)
+                {
+                    return rpcResponse.Result.Value.Deserialize<A2ATask>(s_jsonOptions);
+                }
+
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Cancel a running task using JSON-RPC 2.0 "tasks/cancel" method.
+        /// Returns the task in its final (canceled) state.
+        /// Ref: A2A spec section 7.2
+        /// </summary>
+        public async Task<A2ATask> CancelTaskAsync(
+            CancelTaskRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            ThrowIfDisposed();
+
+            var rpcRequest = new JsonRpcRequest
+            {
+                Method = "tasks/cancel",
+                Id = Guid.NewGuid().ToString("N"),
+                Params = request
+            };
+
+            string json = JsonSerializer.Serialize(rpcRequest, s_jsonOptions);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            Log("Canceling task {0} on {1}", request.Id, _endpoint);
+
+            using (HttpRequestMessage httpRequest = BuildPostRequest(content))
+            {
+                HttpResponseMessage response = await _httpClient
+                    .SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+                response.EnsureSuccessStatusCode();
+
+                string responseJson = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                JsonRpcResponse rpcResponse = JsonSerializer
+                    .Deserialize<JsonRpcResponse>(responseJson, s_jsonOptions);
+
+                if (rpcResponse?.Error != null)
+                {
+                    throw new InvalidOperationException(string.Format(
+                        "A2A error {0}: {1}", rpcResponse.Error.Code, rpcResponse.Error.Message));
+                }
+
+                if (rpcResponse?.Result.HasValue == true)
+                {
+                    return rpcResponse.Result.Value.Deserialize<A2ATask>(s_jsonOptions);
+                }
+
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Send a streaming message using JSON-RPC 2.0 "SendStreamingMessage" method.
         /// Each SSE event is a StreamResponse containing task/message/statusUpdate/artifactUpdate.
         /// Automatically reconnects on connection drops (up to <see cref="MaxReconnectAttempts"/>).

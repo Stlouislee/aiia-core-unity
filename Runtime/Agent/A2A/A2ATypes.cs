@@ -618,6 +618,29 @@ namespace LiveLink.Agent.A2A
         public A2AMessage Message { get; set; }
     }
 
+    /// <summary>
+    /// Params for the "tasks/get" JSON-RPC method.
+    /// Ref: A2A spec section 7.1
+    /// </summary>
+    public class GetTaskRequest
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
+        [JsonPropertyName("historyLength")]
+        public int? HistoryLength { get; set; }
+    }
+
+    /// <summary>
+    /// Params for the "tasks/cancel" JSON-RPC method.
+    /// Ref: A2A spec section 7.2
+    /// </summary>
+    public class CancelTaskRequest
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+    }
+
     // ───────────────────── Legacy Types (kept for backward compat) ─────────────────────
 
     /// <summary>

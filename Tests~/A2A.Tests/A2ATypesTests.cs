@@ -856,5 +856,68 @@ namespace A2A.Tests
             Assert.Contains("\"statusUpdate\"", json);
             Assert.DoesNotContain("\"kind\"", json);
         }
+
+        // ───────────────────── GetTaskRequest ─────────────────────
+
+        [Fact]
+        public void GetTaskRequest_SerializesId()
+        {
+            var req = new GetTaskRequest { Id = "task-42" };
+            string json = JsonSerializer.Serialize(req, s_options);
+
+            Assert.Contains("\"id\":\"task-42\"", json);
+            Assert.DoesNotContain("historyLength", json); // null → omitted
+        }
+
+        [Fact]
+        public void GetTaskRequest_SerializesHistoryLength()
+        {
+            var req = new GetTaskRequest { Id = "task-1", HistoryLength = 10 };
+            string json = JsonSerializer.Serialize(req, s_options);
+
+            Assert.Contains("\"historyLength\":10", json);
+        }
+
+        [Fact]
+        public void GetTaskRequest_RoundTrips()
+        {
+            var req = new GetTaskRequest { Id = "task-abc", HistoryLength = 3 };
+            string json = JsonSerializer.Serialize(req, s_options);
+            var deserialized = JsonSerializer.Deserialize<GetTaskRequest>(json, s_options);
+
+            Assert.Equal("task-abc", deserialized.Id);
+            Assert.Equal(3, deserialized.HistoryLength);
+        }
+
+        [Fact]
+        public void GetTaskRequest_NullHistoryLength_DeserializesAsNull()
+        {
+            string json = "{\"id\":\"t1\"}";
+            var deserialized = JsonSerializer.Deserialize<GetTaskRequest>(json, s_options);
+
+            Assert.Equal("t1", deserialized.Id);
+            Assert.Null(deserialized.HistoryLength);
+        }
+
+        // ───────────────────── CancelTaskRequest ─────────────────────
+
+        [Fact]
+        public void CancelTaskRequest_SerializesId()
+        {
+            var req = new CancelTaskRequest { Id = "task-99" };
+            string json = JsonSerializer.Serialize(req, s_options);
+
+            Assert.Contains("\"id\":\"task-99\"", json);
+        }
+
+        [Fact]
+        public void CancelTaskRequest_RoundTrips()
+        {
+            var req = new CancelTaskRequest { Id = "task-xyz" };
+            string json = JsonSerializer.Serialize(req, s_options);
+            var deserialized = JsonSerializer.Deserialize<CancelTaskRequest>(json, s_options);
+
+            Assert.Equal("task-xyz", deserialized.Id);
+        }
     }
 }

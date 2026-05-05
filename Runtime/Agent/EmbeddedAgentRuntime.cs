@@ -1,4 +1,5 @@
 using System;
+using System.ClientModel;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
@@ -278,11 +279,12 @@ namespace LiveLink.Agent
                 string endpoint = _config.ApiEndpoint;
                 if (!string.IsNullOrWhiteSpace(endpoint))
                 {
-                    openAiClient = new OpenAIClient(new System.Uri(endpoint), apiKey);
+                    var options = new OpenAIClientOptions { Endpoint = new System.Uri(endpoint) };
+                    openAiClient = new OpenAIClient(new ApiKeyCredential(apiKey), options);
                 }
                 else
                 {
-                    openAiClient = new OpenAIClient(apiKey);
+                    openAiClient = new OpenAIClient(new ApiKeyCredential(apiKey));
                 }
 
 #pragma warning disable OPENAI001
