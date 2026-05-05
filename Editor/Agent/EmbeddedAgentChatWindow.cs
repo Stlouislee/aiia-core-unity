@@ -129,10 +129,10 @@ namespace LiveLink.Agent.Editor
 
             GUILayout.FlexibleSpace();
 
-            if (_runtime != null)
-            {
-                GUILayout.Label(_runtime.IsInitialized ? "● Ready" : "○ Not initialized", EditorStyles.toolbarButton);
-            }
+            string statusText = _runtime != null
+                ? (_runtime.IsInitialized ? "● Ready" : "○ Not initialized")
+                : "○ No runtime";
+            GUILayout.Label(statusText, EditorStyles.toolbarButton);
 
             EditorGUILayout.EndHorizontal();
         }
