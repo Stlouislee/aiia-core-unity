@@ -42,6 +42,8 @@ namespace LiveLink.Agent.Editor
         private SerializedProperty _externalMcpServers;
         private SerializedProperty _remoteA2AAgents;
         private SerializedProperty _a2aHostConfig;
+        private bool _showExternalServers = true;
+        private bool _showRemoteA2AAgents = true;
 
         private void OnEnable()
         {
@@ -166,13 +168,18 @@ namespace LiveLink.Agent.Editor
         private void DrawExternalServersSection()
         {
             EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("Downstream MCP Servers", EditorStyles.boldLabel);
+            _showExternalServers = EditorGUILayout.Foldout(_showExternalServers, "Downstream MCP Servers", true);
             GUILayout.FlexibleSpace();
-            if (GUILayout.Button("Add Server", GUILayout.Width(100)))
+            if (_showExternalServers && GUILayout.Button("Add Server", GUILayout.Width(100)))
             {
                 _externalMcpServers.arraySize++;
             }
             EditorGUILayout.EndHorizontal();
+
+            if (!_showExternalServers)
+            {
+                return;
+            }
 
             if (_externalMcpServers.arraySize == 0)
             {
@@ -188,14 +195,10 @@ namespace LiveLink.Agent.Editor
                     ? string.Format("Server {0}", i + 1)
                     : displayName.stringValue;
 
-                serverProperty.isExpanded = EditorGUILayout.BeginFoldoutHeaderGroup(serverProperty.isExpanded, title);
-                if (serverProperty.isExpanded)
-                {
-                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                    DrawServer(serverProperty, i);
-                    EditorGUILayout.EndVertical();
-                }
-                EditorGUILayout.EndFoldoutHeaderGroup();
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
+                DrawServer(serverProperty, i);
+                EditorGUILayout.EndVertical();
                 EditorGUILayout.Space(4);
             }
         }
@@ -316,13 +319,18 @@ namespace LiveLink.Agent.Editor
         private void DrawRemoteA2AAgentsSection()
         {
             EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("Remote A2A Agents", EditorStyles.boldLabel);
+            _showRemoteA2AAgents = EditorGUILayout.Foldout(_showRemoteA2AAgents, "Remote A2A Agents", true);
             GUILayout.FlexibleSpace();
-            if (GUILayout.Button("Add Agent", GUILayout.Width(100)))
+            if (_showRemoteA2AAgents && GUILayout.Button("Add Agent", GUILayout.Width(100)))
             {
                 _remoteA2AAgents.arraySize++;
             }
             EditorGUILayout.EndHorizontal();
+
+            if (!_showRemoteA2AAgents)
+            {
+                return;
+            }
 
             if (_remoteA2AAgents.arraySize == 0)
             {
@@ -341,14 +349,10 @@ namespace LiveLink.Agent.Editor
                     ? string.Format("Agent {0}", i + 1)
                     : displayName.stringValue;
 
-                agentProperty.isExpanded = EditorGUILayout.BeginFoldoutHeaderGroup(agentProperty.isExpanded, title);
-                if (agentProperty.isExpanded)
-                {
-                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                    DrawRemoteA2AAgent(agentProperty, i);
-                    EditorGUILayout.EndVertical();
-                }
-                EditorGUILayout.EndFoldoutHeaderGroup();
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
+                DrawRemoteA2AAgent(agentProperty, i);
+                EditorGUILayout.EndVertical();
                 EditorGUILayout.Space(4);
             }
         }

@@ -45,6 +45,10 @@ namespace LiveLink.Editor
         private SerializedProperty _dynamicAllowedTags;
         private SerializedProperty _toolCacheAsset;
 
+        private double _nextStaleCheckTime;
+        private bool _cachedIsStale;
+        private const double StaleCheckIntervalSeconds = 2.0;
+
         private void OnEnable()
         {
             _manager = (LiveLinkManager)target;
@@ -452,11 +456,19 @@ namespace LiveLink.Editor
             }
             else
             {
+                // Cache the stale check to avoid per-frame assembly scanning + file I/O
+                double now = EditorApplication.timeSinceStartup;
+                if (now >= _nextStaleCheckTime)
+                {
+                    _nextStaleCheckTime = now + StaleCheckIntervalSeconds;
+                    _cachedIsStale = cacheAsset.IsStale;
+                }
+
                 EditorGUILayout.HelpBox(
-                    cacheAsset.IsStale
+                    _cachedIsStale
                         ? "Tool cache is stale. Rebuild to avoid runtime reflection scanning."
                         : "Tool cache is valid.",
-                    cacheAsset.IsStale ? MessageType.Warning : MessageType.Info);
+                    _cachedIsStale ? MessageType.Warning : MessageType.Info);
             }
 
             EditorGUILayout.BeginHorizontal();
