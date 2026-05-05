@@ -392,24 +392,42 @@ namespace LiveLink.Agent
                     .ConfigureAwait(false);
             }
 
-            // If agent card exposes a specific endpoint URL, use it.
+            // If agent card exposes a specific HTTP+JSON endpoint URL, use it.
             Uri agentEndpoint = endpoint;
-            if (card?.SupportedInterfaces != null && card.SupportedInterfaces.Count > 0)
+            if (card?.SupportedInterfaces != null)
             {
-                agentEndpoint = new Uri(card.SupportedInterfaces[0].Url);
+                for (int i = 0; i < card.SupportedInterfaces.Count; i++)
+                {
+                    A2AInterface iface = card.SupportedInterfaces[i];
+                    if (!string.IsNullOrEmpty(iface?.Url)
+                        && string.Equals(iface.ProtocolBinding, "HTTP+JSON", StringComparison.OrdinalIgnoreCase))
+                    {
+                        agentEndpoint = new Uri(iface.Url);
+                        break;
+                    }
+                }
             }
 
             var client = new A2AClient(agentEndpoint, headers, config.ConnectionTimeoutSeconds);
-            var tool = new A2AAgentToolWrapper(
-                config.DisplayName, client, card, config.EnableStreaming, EmitToolCall);
-
-            return new ConnectedA2AAgent
+            try
             {
-                DisplayName = config.DisplayName,
-                Client = client,
-                AgentCard = card,
-                Tool = tool
-            };
+                var tool = new A2AAgentToolWrapper(
+                    config.DisplayName, client, card, config.EnableStreaming, EmitToolCall,
+                    toolNamePrefix: config.DelegateToolPrefix);
+
+                return new ConnectedA2AAgent
+                {
+                    DisplayName = config.DisplayName,
+                    Client = client,
+                    AgentCard = card,
+                    Tool = tool
+                };
+            }
+            catch
+            {
+                client.Dispose();
+                throw;
+            }
         }
 
         private async Task<ConnectedMcpServer> ConnectLocalLiveLinkServerAsync(CancellationToken cancellationToken)

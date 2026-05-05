@@ -52,6 +52,20 @@ namespace A2A.Tests
             Assert.Equal("ask_remote_agent", wrapper.Name);
         }
 
+        [Fact]
+        public void Name_UsesCustomPrefix()
+        {
+            var wrapper = CreateWrapper("OpenClaw", toolNamePrefix: "delegate_");
+            Assert.Equal("delegate_openclaw", wrapper.Name);
+        }
+
+        [Fact]
+        public void Name_CustomPrefix_FallbackForEmptyDisplayName()
+        {
+            var wrapper = CreateWrapper("", toolNamePrefix: "query_");
+            Assert.Equal("query_remote_agent", wrapper.Name);
+        }
+
         // ───────────────────── Description ─────────────────────
 
         [Fact]
@@ -296,10 +310,12 @@ namespace A2A.Tests
             A2AAgentCard agentCard = null,
             HttpMessageHandler handler = null,
             bool enableStreaming = false,
-            Action<string, string> onToolCall = null)
+            Action<string, string> onToolCall = null,
+            string toolNamePrefix = null)
         {
             var client = new A2AClient(s_endpoint, handler ?? new NoOpHandler());
-            return new A2AAgentToolWrapper(displayName, client, agentCard, enableStreaming, onToolCall);
+            return new A2AAgentToolWrapper(displayName, client, agentCard, enableStreaming, onToolCall,
+                toolNamePrefix: toolNamePrefix ?? "ask_");
         }
 
         private class MockHttpHandler : HttpMessageHandler

@@ -278,6 +278,36 @@ namespace A2A.Tests
             }
         }
 
+        [Fact]
+        public async Task SendMessageStreamingAsync_MultiLineData_JoinsWithNewline()
+        {
+            // SSE spec: multiple "data:" lines in one event should be joined with \n.
+            // The joined result must be valid JSON.
+            string ssePayload =
+                "event: message\n" +
+                "data: {\"message\":{\"messageId\":\"r1\",\"role\":\"agent\",\"parts\":[{\"type\":\"text\"\n" +
+                "data: ,\"text\":\"hello world\"}]}}\n" +
+                "\n" +
+                "event: complete\n" +
+                "data: {\"status\":\"completed\"}\n" +
+                "\n";
+
+            var handler = new MockHttpHandler(req =>
+                new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(ssePayload, Encoding.UTF8, "text/event-stream")
+                });
+
+            using (var client = new A2AClient(s_testEndpoint, handler))
+            {
+                List<A2AMessage> messages = await client.SendMessageStreamingAsync(
+                    A2AMessage.CreateUserTextMessage("multi-line test"));
+
+                Assert.Single(messages);
+                Assert.Equal("hello world", messages[0].Parts[0].Text);
+            }
+        }
+
         // ───────────────────── Disposal ─────────────────────
 
         [Fact]
@@ -316,8 +346,8 @@ namespace A2A.Tests
         }
     }
 
-    // Extension to let GetAgentCardAsync accept a handler (static method needs different approach).
-    // We use a small helper class to route the static call through a test handler.
+    // Extension to let GetAgentCardAsync accept a handler for testability.
+    // Now that the real method accepts an optional handler, this simply forwards.
     internal static class A2AClientTestExtensions
     {
         public static Task<A2AAgentCard> GetAgentCardAsync(
@@ -326,45 +356,7 @@ namespace A2A.Tests
             float timeoutSeconds = 30f,
             HttpMessageHandler handler = null)
         {
-            if (handler != null)
-            {
-                // Use the handler-based path.
-                return GetAgentCardWithHandlerAsync(host, handler, headers, timeoutSeconds);
-            }
-
-            return A2AClient.GetAgentCardAsync(host, headers, timeoutSeconds);
-        }
-
-        private static async Task<A2AAgentCard> GetAgentCardWithHandlerAsync(
-            Uri host,
-            HttpMessageHandler handler,
-            Dictionary<string, string> headers,
-            float timeoutSeconds)
-        {
-            Uri cardUri = new Uri(host, "/.well-known/agent-card.json");
-
-            using (var client = new HttpClient(handler))
-            {
-                client.Timeout = TimeSpan.FromSeconds(Math.Max(1f, timeoutSeconds));
-
-                if (headers != null)
-                {
-                    foreach (var header in headers)
-                    {
-                        client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value);
-                    }
-                }
-
-                HttpResponseMessage response = await client.GetAsync(cardUri);
-                response.EnsureSuccessStatusCode();
-
-                string json = await response.Content.ReadAsStringAsync();
-                return JsonSerializer.Deserialize<A2AAgentCard>(json, new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
-                });
-            }
+            return A2AClient.GetAgentCardAsync(host, headers, timeoutSeconds, handler);
         }
     }
 }

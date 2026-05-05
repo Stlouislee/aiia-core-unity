@@ -56,39 +56,61 @@ namespace LiveLink.Agent.A2A
 
         /// <summary>
         /// Fetch the agent card from /.well-known/agent-card.json.
+        /// Accepts an optional handler for testability; when null, a new HttpClient is created.
         /// </summary>
         public static async Task<A2AAgentCard> GetAgentCardAsync(
             Uri host,
             Dictionary<string, string> headers = null,
-            float timeoutSeconds = 30f)
+            float timeoutSeconds = 30f,
+            HttpMessageHandler handler = null)
         {
             // Build the well-known URI.
             Uri cardUri = new Uri(host, "/.well-known/agent-card.json");
 
-            using (var client = new HttpClient())
+            // Reuse the caller-supplied handler when available to avoid socket exhaustion.
+            // Ownership stays with the caller — we do NOT dispose a passed-in handler.
+            bool ownsHandler = handler == null;
+            if (ownsHandler)
             {
-                client.Timeout = TimeSpan.FromSeconds(Math.Max(1f, timeoutSeconds));
+                handler = new HttpClientHandler();
+            }
 
-                if (headers != null)
+            try
+            {
+                using (var client = new HttpClient(handler, disposeHandler: ownsHandler))
                 {
-                    foreach (KeyValuePair<string, string> header in headers)
+                    client.Timeout = TimeSpan.FromSeconds(Math.Max(1f, timeoutSeconds));
+
+                    if (headers != null)
                     {
-                        client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value);
+                        foreach (KeyValuePair<string, string> header in headers)
+                        {
+                            client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value);
+                        }
                     }
+
+                    Debug.Log(string.Format("[LiveLink-A2A] Fetching agent card from {0}", cardUri));
+
+                    HttpResponseMessage response = await client.GetAsync(cardUri).ConfigureAwait(false);
+                    response.EnsureSuccessStatusCode();
+
+                    string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    A2AAgentCard card = JsonSerializer.Deserialize<A2AAgentCard>(json, s_jsonOptions);
+
+                    Debug.Log(string.Format("[LiveLink-A2A] Discovered agent: {0} v{1}",
+                        card?.Name ?? "(unknown)", card?.Version ?? "(unknown)"));
+
+                    return card;
                 }
-
-                Debug.Log(string.Format("[LiveLink-A2A] Fetching agent card from {0}", cardUri));
-
-                HttpResponseMessage response = await client.GetAsync(cardUri).ConfigureAwait(false);
-                response.EnsureSuccessStatusCode();
-
-                string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                A2AAgentCard card = JsonSerializer.Deserialize<A2AAgentCard>(json, s_jsonOptions);
-
-                Debug.Log(string.Format("[LiveLink-A2A] Discovered agent: {0} v{1}",
-                    card?.Name ?? "(unknown)", card?.Version ?? "(unknown)"));
-
-                return card;
+            }
+            catch
+            {
+                // If we created the handler and an error occurred, dispose it to avoid leaks.
+                if (ownsHandler)
+                {
+                    handler?.Dispose();
+                }
+                throw;
             }
         }
 
@@ -171,34 +193,51 @@ namespace LiveLink.Agent.A2A
                 using (var reader = new StreamReader(stream))
                 {
                     string eventType = null;
-                    string dataBuffer = null;
+                    var dataLines = new List<string>();
 
-                    while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
+                    // Register cancellation to unblock ReadLineAsync when the token fires.
+                    using (cancellationToken.Register(() => { try { reader.Dispose(); } catch { } }))
                     {
-                        string line = await reader.ReadLineAsync().ConfigureAwait(false);
-                        if (line == null) break;
+                        while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
+                        {
+                            string line;
+                            try
+                            {
+                                line = await reader.ReadLineAsync().ConfigureAwait(false);
+                            }
+                            catch (ObjectDisposedException)
+                            {
+                                // Reader was disposed by the cancellation callback.
+                                break;
+                            }
 
-                        if (line.StartsWith("event: ", StringComparison.Ordinal))
-                        {
-                            eventType = line.Substring(7).Trim();
-                        }
-                        else if (line.StartsWith("data: ", StringComparison.Ordinal))
-                        {
-                            dataBuffer = line.Substring(6);
-                        }
-                        else if (string.IsNullOrEmpty(line) && dataBuffer != null)
-                        {
-                            // Blank line = end of SSE event.
-                            ProcessSseEvent(eventType, dataBuffer, messages, onMessageChunk);
-                            eventType = null;
-                            dataBuffer = null;
+                            if (line == null) break;
+
+                            if (line.StartsWith("event: ", StringComparison.Ordinal))
+                            {
+                                eventType = line.Substring(7).Trim();
+                            }
+                            else if (line.StartsWith("data: ", StringComparison.Ordinal))
+                            {
+                                // SSE spec: multiple data lines are joined with newlines.
+                                dataLines.Add(line.Substring(6));
+                            }
+                            else if (string.IsNullOrEmpty(line) && dataLines.Count > 0)
+                            {
+                                // Blank line = end of SSE event. Join multi-line data with \n.
+                                string data = string.Join("\n", dataLines);
+                                ProcessSseEvent(eventType, data, messages, onMessageChunk);
+                                eventType = null;
+                                dataLines.Clear();
+                            }
                         }
                     }
 
                     // Flush any trailing event.
-                    if (dataBuffer != null)
+                    if (dataLines.Count > 0)
                     {
-                        ProcessSseEvent(eventType, dataBuffer, messages, onMessageChunk);
+                        string data = string.Join("\n", dataLines);
+                        ProcessSseEvent(eventType, data, messages, onMessageChunk);
                     }
                 }
             }

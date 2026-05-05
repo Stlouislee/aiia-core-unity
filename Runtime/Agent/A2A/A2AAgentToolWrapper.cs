@@ -37,9 +37,10 @@ namespace LiveLink.Agent.A2A
             A2AClient client,
             A2AAgentCard agentCard,
             bool enableStreaming,
-            Action<string, string> onToolCall = null)
+            Action<string, string> onToolCall = null,
+            string toolNamePrefix = "ask_")
         {
-            _name = SanitizeToolName(displayName);
+            _name = SanitizeToolName(displayName, toolNamePrefix);
             _description = BuildDescription(agentCard, displayName);
             _client = client ?? throw new ArgumentNullException(nameof(client));
             _agentCard = agentCard;
@@ -174,12 +175,15 @@ namespace LiveLink.Agent.A2A
 
         /// <summary>
         /// Turn a display name into a safe tool name: lowercase, alphanumeric + underscores.
+        /// Uses the provided prefix (e.g., "ask_") prepended to the sanitized name.
         /// </summary>
-        private static string SanitizeToolName(string displayName)
+        private static string SanitizeToolName(string displayName, string prefix)
         {
-            if (string.IsNullOrWhiteSpace(displayName)) return "ask_remote_agent";
+            if (string.IsNullOrWhiteSpace(prefix)) prefix = "ask_";
 
-            var sb = new StringBuilder("ask_");
+            if (string.IsNullOrWhiteSpace(displayName)) return prefix + "remote_agent";
+
+            var sb = new StringBuilder(prefix);
             for (int i = 0; i < displayName.Length; i++)
             {
                 char c = displayName[i];
@@ -189,7 +193,7 @@ namespace LiveLink.Agent.A2A
                 }
                 else if (c == ' ' || c == '-' || c == '_')
                 {
-                    // Avoid double underscores.
+                    // Avoid double underscores: skip if the last char is already '_'.
                     if (sb.Length > 0 && sb[sb.Length - 1] != '_')
                     {
                         sb.Append('_');
@@ -203,7 +207,7 @@ namespace LiveLink.Agent.A2A
                 sb.Length--;
             }
 
-            return sb.Length > 4 ? sb.ToString() : "ask_remote_agent";
+            return sb.Length > prefix.Length ? sb.ToString() : prefix + "remote_agent";
         }
 
         private static string BuildDescription(A2AAgentCard card, string displayName)

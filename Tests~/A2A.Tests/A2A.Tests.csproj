@@ -4,6 +4,8 @@
     <TargetFramework>net8.0</TargetFramework>
     <IsPackable>false</IsPackable>
     <Nullable>disable</Nullable>
+    <!-- Suppress CS0649 for Unity [SerializeField] fields that are assigned by the Unity serializer at runtime -->
+    <NoWarn>$(NoWarn);CS0649</NoWarn>
     <RootNamespace>A2A.Tests</RootNamespace>
   </PropertyGroup>
 
