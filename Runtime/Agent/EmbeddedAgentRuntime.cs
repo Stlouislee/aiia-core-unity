@@ -1229,7 +1229,7 @@ namespace LiveLink.Agent
                 _onInvoked = onInvoked;
             }
 
-            protected override ValueTask<object?> InvokeCoreAsync(AIFunctionArguments arguments, CancellationToken cancellationToken)
+            protected override ValueTask<object> InvokeCoreAsync(AIFunctionArguments arguments, CancellationToken cancellationToken)
             {
                 _onInvoked?.Invoke(Name, SerializeArguments(arguments));
                 return base.InvokeCoreAsync(arguments, cancellationToken);

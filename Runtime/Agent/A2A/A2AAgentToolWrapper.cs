@@ -72,7 +72,7 @@ namespace LiveLink.Agent.A2A
             }
         }
 
-        protected override async ValueTask<object?> InvokeCoreAsync(
+        protected override async ValueTask<object> InvokeCoreAsync(
             AIFunctionArguments arguments,
             CancellationToken cancellationToken)
         {
