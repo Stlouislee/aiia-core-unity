@@ -12,6 +12,8 @@ LiveLink is a dedicated Unity package designed to bring advanced, extensible AI 
 - 🖥️ **Custom Editor**: Easy-to-use inspector with status display and controls
 - 🤝 **MCP Support**: JSON-RPC endpoint exposing scene resources and Unity tools
 - 🤖 **A2A Protocol**: Agent-to-Agent communication via [A2A v1.0](https://a2a-protocol.org) — delegate tasks to remote agents and expose your Unity agent as a discoverable A2A endpoint
+- 💬 **Play Mode Chat Window**: Interactive editor window for testing the embedded agent with streaming responses, tool call visualization, and token usage tracking
+- 📊 **Structured Agent Responses**: `RunAsync` returns `AgentResponse` with full execution trace (messages, tool calls, tool results, usage, finish reason), aligned with Microsoft Agent Framework
 
 ## Understanding LiveLink in Unity App
 

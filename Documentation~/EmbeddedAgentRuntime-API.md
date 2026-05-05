@@ -174,6 +174,23 @@ await _agentRuntime.ShutdownAsync();
 
 ---
 
+## Play Mode Chat Window
+
+A built-in editor window for interactive testing during Play Mode.
+
+**Open:** `LiveLink > Agent Chat` or click **"Open Chat Window"** in the Inspector.
+
+**Features:**
+- Streaming text display with real-time `AgentResponseUpdate` processing
+- Collapsible tool call/result foldouts with name, args, call ID
+- Per-response token usage, duration, finish reason
+- Stop button for cancelling in-flight requests
+- Enter to send, Shift+Enter for newline
+
+The chat window uses `RunStreamingAsync` internally, demonstrating the recommended pattern for rich agent interaction.
+
+---
+
 ## Alignment with Microsoft Agent Framework
 
 | Microsoft Agent Framework | EmbeddedAgentRuntime |
