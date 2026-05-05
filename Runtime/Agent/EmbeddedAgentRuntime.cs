@@ -201,11 +201,11 @@ namespace LiveLink.Agent
                 SetStatus("Initializing agent runtime...");
                 _lastError = string.Empty;
 
-                string apiKey = _config.ResolveOpenAIApiKey();
+                string apiKey = _config.ResolveApiKey();
                 if (string.IsNullOrWhiteSpace(apiKey))
                 {
                     throw new InvalidOperationException(
-                        "No OpenAI API key was configured. Set one on the AgentRuntimeConfig asset or provide it through the configured environment variable.");
+                        "No API key was configured. Set one on the AgentRuntimeConfig asset, call SetApiKey() at runtime, or provide it through the configured environment variable.");
                 }
 
                 await ResolveLiveLinkManagerReferenceAsync(cancellationToken).ConfigureAwait(false);
@@ -273,10 +273,20 @@ namespace LiveLink.Agent
                 List<AITool> tools = BuildToolList(warnings);
                 string instructions = BuildInstructions(warnings);
 
-                SetStatus("Creating OpenAI chat client...");
-                var openAiClient = new OpenAIClient(apiKey);
+                SetStatus("Creating chat client...");
+                OpenAIClient openAiClient;
+                string endpoint = _config.ApiEndpoint;
+                if (!string.IsNullOrWhiteSpace(endpoint))
+                {
+                    openAiClient = new OpenAIClient(new System.Uri(endpoint), apiKey);
+                }
+                else
+                {
+                    openAiClient = new OpenAIClient(apiKey);
+                }
+
 #pragma warning disable OPENAI001
-                IChatClient chatClient = openAiClient.GetChatClient(_config.OpenAIModel).AsIChatClient();
+                IChatClient chatClient = openAiClient.GetChatClient(_config.Model).AsIChatClient();
 #pragma warning restore OPENAI001
 
                 ChatHistoryProvider chatHistoryProvider = null;

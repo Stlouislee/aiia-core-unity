@@ -24,10 +24,11 @@ namespace LiveLink.Agent.Editor
         }
 
         private SerializedProperty _agentName;
-        private SerializedProperty _openAIModel;
+        private SerializedProperty _apiEndpoint;
+        private SerializedProperty _model;
         private SerializedProperty _preferEnvironmentApiKey;
-        private SerializedProperty _openAIApiKeyEnvironmentVariable;
-        private SerializedProperty _openAIApiKey;
+        private SerializedProperty _apiKeyEnvironmentVariable;
+        private SerializedProperty _apiKey;
         private SerializedProperty _systemInstructions;
         private SerializedProperty _enableLocalLiveLinkMcp;
         private SerializedProperty _autoStartLocalLiveLinkMcp;
@@ -48,10 +49,11 @@ namespace LiveLink.Agent.Editor
         private void OnEnable()
         {
             _agentName = serializedObject.FindProperty("_agentName");
-            _openAIModel = serializedObject.FindProperty("_openAIModel");
+            _apiEndpoint = serializedObject.FindProperty("_apiEndpoint");
+            _model = serializedObject.FindProperty("_model");
             _preferEnvironmentApiKey = serializedObject.FindProperty("_preferEnvironmentApiKey");
-            _openAIApiKeyEnvironmentVariable = serializedObject.FindProperty("_openAIApiKeyEnvironmentVariable");
-            _openAIApiKey = serializedObject.FindProperty("_openAIApiKey");
+            _apiKeyEnvironmentVariable = serializedObject.FindProperty("_apiKeyEnvironmentVariable");
+            _apiKey = serializedObject.FindProperty("_apiKey");
             _systemInstructions = serializedObject.FindProperty("_systemInstructions");
             _enableLocalLiveLinkMcp = serializedObject.FindProperty("_enableLocalLiveLinkMcp");
             _autoStartLocalLiveLinkMcp = serializedObject.FindProperty("_autoStartLocalLiveLinkMcp");
@@ -72,7 +74,7 @@ namespace LiveLink.Agent.Editor
         {
             serializedObject.Update();
 
-            DrawOpenAISection();
+            DrawChatBackendSection();
             EditorGUILayout.Space(8);
             DrawAgentBehaviorSection();
             EditorGUILayout.Space(8);
@@ -89,20 +91,21 @@ namespace LiveLink.Agent.Editor
             serializedObject.ApplyModifiedProperties();
         }
 
-        private void DrawOpenAISection()
+        private void DrawChatBackendSection()
         {
-            EditorGUILayout.LabelField("OpenAI Chat Backend", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Chat Backend", EditorStyles.boldLabel);
             EditorGUILayout.PropertyField(_agentName);
-            EditorGUILayout.PropertyField(_openAIModel);
+            EditorGUILayout.PropertyField(_apiEndpoint, new GUIContent("API Endpoint", "Leave empty for default OpenAI. Set to a custom URL for OpenAI-compatible providers."));
+            EditorGUILayout.PropertyField(_model, new GUIContent("Model", "Model identifier (e.g., gpt-4o-mini, deepseek-chat, llama-3)."));
             EditorGUILayout.PropertyField(_preferEnvironmentApiKey, new GUIContent("Prefer Environment API Key"));
-            EditorGUILayout.PropertyField(_openAIApiKeyEnvironmentVariable, new GUIContent("API Key Environment Variable"));
+            EditorGUILayout.PropertyField(_apiKeyEnvironmentVariable, new GUIContent("API Key Environment Variable"));
 
             if (!_preferEnvironmentApiKey.boolValue)
             {
                 EditorGUILayout.HelpBox("The embedded agent will use the API key stored in this asset.", MessageType.Warning);
             }
 
-            EditorGUILayout.PropertyField(_openAIApiKey, new GUIContent("Fallback API Key"));
+            EditorGUILayout.PropertyField(_apiKey, new GUIContent("API Key"));
         }
 
         private void DrawAgentBehaviorSection()
