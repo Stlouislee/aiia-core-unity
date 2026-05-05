@@ -366,6 +366,7 @@ namespace LiveLink.Agent.Editor
             if (isRunning && GUILayout.Button("Stop", GUILayout.Height(18)))
             {
                 _streamCts?.Cancel();
+                GUIUtility.ExitGUI();
             }
 
             EditorGUILayout.EndVertical();

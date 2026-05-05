@@ -425,7 +425,7 @@ namespace LiveLink.Agent
                     _session = await _agent.CreateSessionAsync().ConfigureAwait(false);
                 }
 
-                AgentResponse response = await _agent.RunAsync(message, _session).ConfigureAwait(false);
+                AgentResponse response = await _agent.RunAsync(message, _session, cancellationToken: cancellationToken).ConfigureAwait(false);
                 _lastAgentResponse = response;
                 _lastResponse = response?.Text ?? string.Empty;
 
@@ -493,6 +493,8 @@ namespace LiveLink.Agent
 
                 await foreach (AgentResponseUpdate update in _agent.RunStreamingAsync(message, _session, cancellationToken: cancellationToken).ConfigureAwait(false))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     // Accumulate text for LastResponse.
                     if (update.Text != null)
                     {
