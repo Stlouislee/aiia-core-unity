@@ -106,6 +106,12 @@ namespace LiveLink.Agent.Editor
             }
 
             EditorGUILayout.PropertyField(_apiKey, new GUIContent("API Key"));
+
+            EditorGUILayout.Space(4);
+            if (GUILayout.Button("Test LLM Connection"))
+            {
+                RunLlmTest();
+            }
         }
 
         private void DrawAgentBehaviorSection()
@@ -317,6 +323,43 @@ namespace LiveLink.Agent.Editor
             }
 
             EditorUtility.DisplayDialog("MCP Connection Successful", builder.ToString(), "OK");
+        }
+
+        private void RunLlmTest()
+        {
+            AgentRuntimeConfig config = (AgentRuntimeConfig)target;
+            AgentLlmTestResult result = null;
+
+            try
+            {
+                EditorUtility.DisplayProgressBar("Testing LLM", string.Format("Sending test request to {0}...", config.Model), 0.5f);
+                result = AgentLlmTester.TestConnectionAsync(config, CancellationToken.None).GetAwaiter().GetResult();
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            if (result == null)
+            {
+                EditorUtility.DisplayDialog("LLM Test", "The test did not return a result.", "OK");
+                return;
+            }
+
+            if (!result.Success)
+            {
+                EditorUtility.DisplayDialog(
+                    "LLM Connection Failed",
+                    string.Format("Model: {0}\n\n{1}", result.Model ?? "(not set)", result.ErrorMessage),
+                    "OK");
+                return;
+            }
+
+            EditorUtility.DisplayDialog(
+                "LLM Connection Successful",
+                string.Format("Model: {0}\nLatency: {1}ms\n\nResponse: {2}",
+                    result.Model, result.LatencyMs, result.ResponseText),
+                "OK");
         }
 
         private void DrawRemoteA2AAgentsSection()
