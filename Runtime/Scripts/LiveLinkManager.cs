@@ -339,6 +339,7 @@ namespace LiveLink
 
         private void OnDestroy()
         {
+            _scanner?.Dispose();
             StopServer();
             StopMCPServer();
         }

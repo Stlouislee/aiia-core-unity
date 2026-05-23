@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Threading;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using LiveLink.Network;
@@ -24,14 +26,18 @@ namespace LiveLink
     /// <summary>
     /// Scans the Unity scene hierarchy and converts it to serializable DTOs.
     /// Supports both full scene scanning and targeted branch scanning.
+    /// Thread-safe: all dictionary access is protected by a <see cref="ReaderWriterLockSlim"/>.
     /// </summary>
-    public class SceneScanner
+    public class SceneScanner : IDisposable
     {
         private readonly Dictionary<int, string> _instanceIdToUuid = new Dictionary<int, string>();
         private readonly Dictionary<string, GameObject> _uuidToGameObject = new Dictionary<string, GameObject>();
         private readonly Dictionary<string, Vector3> _lastPositions = new Dictionary<string, Vector3>();
         private readonly Dictionary<string, Quaternion> _lastRotations = new Dictionary<string, Quaternion>();
-        
+
+        // Single lock protecting all four dictionaries.
+        private readonly ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
+
         private ScanScope _scope = ScanScope.WholeScene;
         private Transform _targetRoot;
         private bool _includeInactive = false;
@@ -74,28 +80,67 @@ namespace LiveLink
         }
 
         /// <summary>
-        /// Gets the UUID-to-GameObject lookup dictionary.
+        /// Gets a snapshot of the UUID-to-GameObject lookup dictionary.
+        /// Returns a copy to prevent <see cref="InvalidOperationException"/> from concurrent modification during enumeration.
         /// </summary>
-        public IReadOnlyDictionary<string, GameObject> UUIDToGameObject => _uuidToGameObject;
+        public IReadOnlyDictionary<string, GameObject> UUIDToGameObject
+        {
+            get
+            {
+                _lock.EnterReadLock();
+                try
+                {
+                    return new Dictionary<string, GameObject>(_uuidToGameObject);
+                }
+                finally
+                {
+                    _lock.ExitReadLock();
+                }
+            }
+        }
 
         /// <summary>
         /// Gets the UUID for a GameObject, creating one if necessary.
+        /// Thread-safe via an upgradeable read lock with double-checked write.
         /// </summary>
         public string GetOrCreateUUID(GameObject obj)
         {
             if (obj == null) return null;
 
             int instanceId = obj.GetInstanceID();
-            if (_instanceIdToUuid.TryGetValue(instanceId, out string uuid))
-            {
-                return uuid;
-            }
 
-            // Generate new UUID
-            uuid = System.Guid.NewGuid().ToString("N").Substring(0, 12);
-            _instanceIdToUuid[instanceId] = uuid;
-            _uuidToGameObject[uuid] = obj;
-            return uuid;
+            _lock.EnterUpgradeableReadLock();
+            try
+            {
+                if (_instanceIdToUuid.TryGetValue(instanceId, out string uuid))
+                {
+                    return uuid;
+                }
+
+                // Cache miss — upgrade to write lock.
+                _lock.EnterWriteLock();
+                try
+                {
+                    // Double-check after acquiring write lock.
+                    if (_instanceIdToUuid.TryGetValue(instanceId, out uuid))
+                    {
+                        return uuid;
+                    }
+
+                    uuid = System.Guid.NewGuid().ToString("N").Substring(0, 12);
+                    _instanceIdToUuid[instanceId] = uuid;
+                    _uuidToGameObject[uuid] = obj;
+                    return uuid;
+                }
+                finally
+                {
+                    _lock.ExitWriteLock();
+                }
+            }
+            finally
+            {
+                _lock.ExitUpgradeableReadLock();
+            }
         }
 
         /// <summary>
@@ -104,8 +149,17 @@ namespace LiveLink
         public GameObject GetGameObjectByUUID(string uuid)
         {
             if (string.IsNullOrEmpty(uuid)) return null;
-            _uuidToGameObject.TryGetValue(uuid, out GameObject obj);
-            return obj;
+
+            _lock.EnterReadLock();
+            try
+            {
+                _uuidToGameObject.TryGetValue(uuid, out GameObject obj);
+                return obj;
+            }
+            finally
+            {
+                _lock.ExitReadLock();
+            }
         }
 
         /// <summary>
@@ -115,9 +169,17 @@ namespace LiveLink
         {
             if (obj == null || string.IsNullOrEmpty(uuid)) return;
 
-            int instanceId = obj.GetInstanceID();
-            _instanceIdToUuid[instanceId] = uuid;
-            _uuidToGameObject[uuid] = obj;
+            _lock.EnterWriteLock();
+            try
+            {
+                int instanceId = obj.GetInstanceID();
+                _instanceIdToUuid[instanceId] = uuid;
+                _uuidToGameObject[uuid] = obj;
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
         }
 
         /// <summary>
@@ -127,13 +189,21 @@ namespace LiveLink
         {
             if (obj == null) return;
 
-            int instanceId = obj.GetInstanceID();
-            if (_instanceIdToUuid.TryGetValue(instanceId, out string uuid))
+            _lock.EnterWriteLock();
+            try
             {
-                _instanceIdToUuid.Remove(instanceId);
-                _uuidToGameObject.Remove(uuid);
-                _lastPositions.Remove(uuid);
-                _lastRotations.Remove(uuid);
+                int instanceId = obj.GetInstanceID();
+                if (_instanceIdToUuid.TryGetValue(instanceId, out string uuid))
+                {
+                    _instanceIdToUuid.Remove(instanceId);
+                    _uuidToGameObject.Remove(uuid);
+                    _lastPositions.Remove(uuid);
+                    _lastRotations.Remove(uuid);
+                }
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
             }
         }
 
@@ -142,10 +212,26 @@ namespace LiveLink
         /// </summary>
         public void Clear()
         {
-            _instanceIdToUuid.Clear();
-            _uuidToGameObject.Clear();
-            _lastPositions.Clear();
-            _lastRotations.Clear();
+            _lock.EnterWriteLock();
+            try
+            {
+                _instanceIdToUuid.Clear();
+                _uuidToGameObject.Clear();
+                _lastPositions.Clear();
+                _lastRotations.Clear();
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
+        }
+
+        /// <summary>
+        /// Disposes the <see cref="ReaderWriterLockSlim"/> used to protect dictionary access.
+        /// </summary>
+        public void Dispose()
+        {
+            _lock.Dispose();
         }
 
         /// <summary>
@@ -228,9 +314,17 @@ namespace LiveLink
             var dto = CreateDTO(transform, parentUuid);
             results.Add(dto);
 
-            // Update last known positions
-            _lastPositions[dto.UUID] = transform.position;
-            _lastRotations[dto.UUID] = transform.rotation;
+            // Update last known positions under write lock.
+            _lock.EnterWriteLock();
+            try
+            {
+                _lastPositions[dto.UUID] = transform.position;
+                _lastRotations[dto.UUID] = transform.rotation;
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
 
             // Scan children
             for (int i = 0; i < transform.childCount; i++)
@@ -255,27 +349,34 @@ namespace LiveLink
             string uuid = GetOrCreateUUID(transform.gameObject);
             bool hasChanged = false;
 
-            // Check if position changed
-            if (_lastPositions.TryGetValue(uuid, out Vector3 lastPos))
+            // Check if position or rotation changed under read lock.
+            _lock.EnterReadLock();
+            try
             {
-                if (Vector3.Distance(transform.position, lastPos) > _deltaThreshold)
+                if (_lastPositions.TryGetValue(uuid, out Vector3 lastPos))
                 {
+                    if (Vector3.Distance(transform.position, lastPos) > _deltaThreshold)
+                    {
+                        hasChanged = true;
+                    }
+                }
+                else
+                {
+                    // New object
                     hasChanged = true;
                 }
-            }
-            else
-            {
-                // New object
-                hasChanged = true;
-            }
 
-            // Check if rotation changed
-            if (!hasChanged && _lastRotations.TryGetValue(uuid, out Quaternion lastRot))
-            {
-                if (Quaternion.Angle(transform.rotation, lastRot) > _deltaThreshold)
+                if (!hasChanged && _lastRotations.TryGetValue(uuid, out Quaternion lastRot))
                 {
-                    hasChanged = true;
+                    if (Quaternion.Angle(transform.rotation, lastRot) > _deltaThreshold)
+                    {
+                        hasChanged = true;
+                    }
                 }
+            }
+            finally
+            {
+                _lock.ExitReadLock();
             }
 
             if (hasChanged)
@@ -284,8 +385,16 @@ namespace LiveLink
                 var dto = CreateDTO(transform, parentUuid);
                 changedObjects.Add(dto);
 
-                _lastPositions[uuid] = transform.position;
-                _lastRotations[uuid] = transform.rotation;
+                _lock.EnterWriteLock();
+                try
+                {
+                    _lastPositions[uuid] = transform.position;
+                    _lastRotations[uuid] = transform.rotation;
+                }
+                finally
+                {
+                    _lock.ExitWriteLock();
+                }
             }
 
             // Recurse children
@@ -322,11 +431,23 @@ namespace LiveLink
 
         /// <summary>
         /// Gets all objects in the scene as DTOs.
+        /// Snapshots the dictionary to avoid concurrent modification during enumeration.
         /// </summary>
         public List<SceneObjectDTO> GetSceneObjects(bool includeInactive)
         {
+            Dictionary<string, GameObject> snapshot;
+            _lock.EnterReadLock();
+            try
+            {
+                snapshot = new Dictionary<string, GameObject>(_uuidToGameObject);
+            }
+            finally
+            {
+                _lock.ExitReadLock();
+            }
+
             var result = new List<SceneObjectDTO>();
-            foreach (var kvp in _uuidToGameObject)
+            foreach (var kvp in snapshot)
             {
                 if (kvp.Value != null && (includeInactive || kvp.Value.activeInHierarchy))
                 {
@@ -339,39 +460,56 @@ namespace LiveLink
 
         /// <summary>
         /// Cleans up references to destroyed objects.
+        /// The entire find-and-remove operation is performed under a single write lock
+        /// to prevent race conditions between concurrent registrations and cleanup.
         /// </summary>
         public void CleanupDestroyedObjects()
         {
-            var toRemove = new List<string>();
-
-            foreach (var kvp in _uuidToGameObject)
+            _lock.EnterWriteLock();
+            try
             {
-                if (kvp.Value == null)
-                {
-                    toRemove.Add(kvp.Key);
-                }
-            }
+                // Collect both UUIDs and corresponding instance IDs in a single forward pass.
+                var uuidsToRemove = new List<string>();
+                var instanceIdsToRemove = new List<int>();
 
-            foreach (var uuid in toRemove)
-            {
-                _uuidToGameObject.Remove(uuid);
-                _lastPositions.Remove(uuid);
-                _lastRotations.Remove(uuid);
-
-                // Also clean instanceId mapping
-                int? instanceIdToRemove = null;
-                foreach (var kvp in _instanceIdToUuid)
+                foreach (var kvp in _uuidToGameObject)
                 {
-                    if (kvp.Value == uuid)
+                    if (kvp.Value == null)
                     {
-                        instanceIdToRemove = kvp.Key;
-                        break;
+                        uuidsToRemove.Add(kvp.Key);
                     }
                 }
-                if (instanceIdToRemove.HasValue)
+
+                if (uuidsToRemove.Count == 0)
                 {
-                    _instanceIdToUuid.Remove(instanceIdToRemove.Value);
+                    return;
                 }
+
+                // Build a reverse lookup for the instance IDs that correspond to the dead UUIDs.
+                foreach (var kvp in _instanceIdToUuid)
+                {
+                    if (uuidsToRemove.Contains(kvp.Value))
+                    {
+                        instanceIdsToRemove.Add(kvp.Key);
+                    }
+                }
+
+                // Remove all stale entries.
+                foreach (var uuid in uuidsToRemove)
+                {
+                    _uuidToGameObject.Remove(uuid);
+                    _lastPositions.Remove(uuid);
+                    _lastRotations.Remove(uuid);
+                }
+
+                foreach (var instanceId in instanceIdsToRemove)
+                {
+                    _instanceIdToUuid.Remove(instanceId);
+                }
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
             }
         }
     }
